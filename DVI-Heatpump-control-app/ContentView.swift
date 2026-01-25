@@ -123,6 +123,13 @@ struct ContentView: View {
                     }
                 }
             }
+            .onChange(of: bridgeConfig.activeURL) {
+                // When activeURL changes (network switch), force reload if webview is showing
+                if showWebView && bridgeConfig.activeURL != nil {
+                    print("Active URL changed, triggering reload")
+                    reloadTrigger = true
+                }
+            }
             .onChange(of: scannedCode) {
                 if let code = scannedCode {
                     manualAddress = code

@@ -112,6 +112,10 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     }
     
     // MARK: - URL Selection Logic
+    func checkNetworkAndUpdateURL() {
+        updateActiveURL()
+    }
+    
     private func updateActiveURL() {
         guard let path = networkMonitor?.currentPath else { return }
         let onWiFi = path.usesInterfaceType(.wifi)
@@ -121,18 +125,23 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
            let savedBridge = discoveredBridges.first(where: { $0.name == savedName || $0.tunnelURL == savedTunnelURL }) {
             // If on WiFi, use local URL
             if onWiFi {
-                activeURL = URL(string: savedBridge.localAddress)
-                rawAddress = savedBridge.localAddress
-                print("Switching to local URL: \(savedBridge.localAddress)")
+                let newURL = savedBridge.localAddress
+                if rawAddress != newURL {
+                    activeURL = URL(string: newURL)
+                    rawAddress = newURL
+                    print("Switching to local URL: \(newURL)")
+                }
             } else if let tunnelURL = savedBridge.tunnelURL {
                 // Not on WiFi, use tunnel URL
-                activeURL = URL(string: tunnelURL)
-                rawAddress = tunnelURL
-                print("Switching to tunnel URL: \(tunnelURL)")
+                if rawAddress != tunnelURL {
+                    activeURL = URL(string: tunnelURL)
+                    rawAddress = tunnelURL
+                    print("Switching to tunnel URL: \(tunnelURL)")
+                }
             }
         } else if let tunnelURL = savedTunnelURL {
             // Fallback: if we have a saved tunnel URL, use it (especially when on cellular)
-            if !onWiFi {
+            if !onWiFi && rawAddress != tunnelURL {
                 activeURL = normalizedURL
                 rawAddress = tunnelURL
                 print("Using saved tunnel URL: \(tunnelURL)")
