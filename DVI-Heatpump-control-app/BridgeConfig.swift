@@ -6,14 +6,29 @@
 //
 import Foundation
 import Combine
+import Network
 
 class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetServiceDelegate {
     @Published var rawAddress: String? = UserDefaults.standard.string(forKey: "savedTunnelURL")
     @Published var discoveredBridges: [DiscoveredBridge] = []
+    @Published var isOnLocalNetwork: Bool = false
+    @Published var activeURL: URL? = nil
     
     private var browser: NetServiceBrowser?
     private var resolvingServices: Set<NetService> = []
     private var discoveredServicesMap: [String: DiscoveredBridge] = [:]
+    private var networkMonitor: NWPathMonitor?
+    private var monitorQueue = DispatchQueue(label: "NetworkMonitor")
+    
+    // Store saved bridge info
+    private var savedTunnelURL: String? {
+        get { UserDefaults.standard.string(forKey: "savedTunnelURL") }
+        set { UserDefaults.standard.set(newValue, forKey: "savedTunnelURL") }
+    }
+    private var savedBridgeName: String? {
+        get { UserDefaults.standard.string(forKey: "savedBridgeName") }
+        set { UserDefaults.standard.set(newValue, forKey: "savedBridgeName") }
+    }
     
     struct DiscoveredBridge: Identifiable, Equatable {
         let id = UUID()
@@ -24,6 +39,7 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
 
     override init() {
         super.init()
+        startNetworkMonitoring()
     }
 
     // MARK: - Normalized URL
@@ -48,7 +64,47 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         return URL(string: "https://\(raw)")
     }
 
-    // MARK: - Discovery with NetService (backward compatible)
+    // MARK: - Network Monitoring
+    func startNetworkMonitoring() {
+        networkMonitor = NWPathMonitor()
+        networkMonitor?.pathUpdateHandler = { [weak self] path in
+            DispatchQueue.main.async {
+                self?.isOnLocalNetwork = path.status == .satisfied
+                self?.updateActiveURL()
+            }
+        }
+        networkMonitor?.start(queue: monitorQueue)
+    }
+    
+    func stopNetworkMonitoring() {
+        networkMonitor?.cancel()
+        networkMonitor = nil
+    }
+    
+    // MARK: - URL Selection Logic
+    private func updateActiveURL() {
+        // Find the saved bridge if we have one
+        if let savedName = savedBridgeName,
+           let savedBridge = discoveredBridges.first(where: { $0.name == savedName || $0.tunnelURL == savedTunnelURL }) {
+            // If on local network and we discovered the bridge, use local URL
+            if isOnLocalNetwork {
+                activeURL = URL(string: savedBridge.localAddress)
+                rawAddress = savedBridge.localAddress
+                print("Switching to local URL: \(savedBridge.localAddress)")
+            } else if let tunnelURL = savedBridge.tunnelURL {
+                // Not on local network, use tunnel URL
+                activeURL = URL(string: tunnelURL)
+                rawAddress = tunnelURL
+                print("Switching to tunnel URL: \(tunnelURL)")
+            }
+        } else if let tunnelURL = savedTunnelURL {
+            // Fallback to saved tunnel URL if bridge not discovered
+            activeURL = normalizedURL
+            rawAddress = tunnelURL
+        }
+    }
+    
+    // MARK: - Discovery with NetService
     func startDiscovery() {
         browser = NetServiceBrowser()
         browser?.delegate = self
@@ -147,12 +203,31 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     private func updateDiscoveredBridges() {
         DispatchQueue.main.async {
             self.discoveredBridges = Array(self.discoveredServicesMap.values)
+            self.updateActiveURL()
         }
     }
 
     // MARK: - Persistence
     func saveTunnelURL(_ url: String) {
-        UserDefaults.standard.set(url, forKey: "savedTunnelURL")
+        savedTunnelURL = url
         rawAddress = url
+    }
+    
+    func saveBridge(_ bridge: DiscoveredBridge) {
+        if let tunnelURL = bridge.tunnelURL {
+            savedTunnelURL = tunnelURL
+        }
+        savedBridgeName = bridge.name
+        updateActiveURL()
+    }
+    
+    // Check if we should auto-connect to a discovered bridge
+    func shouldAutoConnect() -> Bool {
+        guard let savedName = savedBridgeName else { return false }
+        return discoveredBridges.contains(where: { $0.name == savedName })
+    }
+    
+    deinit {
+        stopNetworkMonitoring()
     }
 }

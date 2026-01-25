@@ -16,6 +16,7 @@ struct ContentView: View {
     @State private var reloadTrigger = false
     @State private var showQRScanner = false
     @State private var scannedCode: String? = nil
+    @State private var hasAutoConnected = false
 
     var body: some View {
         NavigationView {
@@ -34,14 +35,8 @@ struct ContentView: View {
                         
                         ForEach(bridgeConfig.discoveredBridges) { bridge in
                             Button(action: {
-                                // Save tunnel URL if available
-                                if let tunnelURL = bridge.tunnelURL {
-                                    bridgeConfig.saveTunnelURL(tunnelURL)
-                                    manualAddress = tunnelURL
-                                } else {
-                                    // Use local address for now
-                                    manualAddress = bridge.localAddress
-                                }
+                                bridgeConfig.saveBridge(bridge)
+                                manualAddress = bridgeConfig.isOnLocalNetwork ? bridge.localAddress : (bridge.tunnelURL ?? bridge.localAddress)
                                 attemptConnection()
                             }) {
                                 HStack {
@@ -49,7 +44,7 @@ struct ContentView: View {
                                     VStack(alignment: .leading) {
                                         Text(bridge.name)
                                             .font(.subheadline)
-                                        Text(bridge.tunnelURL ?? bridge.localAddress)
+                                        Text(bridgeConfig.isOnLocalNetwork ? "Local: \(bridge.localAddress)" : "Remote: \(bridge.tunnelURL ?? "N/A")")
                                             .font(.caption)
                                             .foregroundColor(.secondary)
                                     }
@@ -107,6 +102,23 @@ struct ContentView: View {
             }
             .onDisappear {
                 bridgeConfig.stopDiscovery()
+            }
+            .onChange(of: bridgeConfig.discoveredBridges) { bridges in
+                // Auto-connect if we find the saved bridge and haven't already connected
+                if !hasAutoConnected && bridgeConfig.shouldAutoConnect() {
+                    hasAutoConnected = true
+                    if let activeURL = bridgeConfig.activeURL {
+                        manualAddress = activeURL.absoluteString
+                        attemptConnection()
+                    }
+                }
+            }
+            .onChange(of: bridgeConfig.isOnLocalNetwork) { _ in
+                // When network status changes, update the active URL
+                if showWebView, let activeURL = bridgeConfig.activeURL {
+                    manualAddress = activeURL.absoluteString
+                    reloadTrigger = true
+                }
             }
             .onChange(of: scannedCode) { newValue in
                 if let code = newValue {
