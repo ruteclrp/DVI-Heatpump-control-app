@@ -100,10 +100,12 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
                     let sockaddr = baseAddress.assumingMemoryBound(to: sockaddr.self)
                     
                     if sockaddr.pointee.sa_family == AF_INET {
-                        let addr = baseAddress.assumingMemoryBound(to: sockaddr_in.self)
-                        var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-                        inet_ntop(AF_INET, &addr.pointee.sin_addr, &buffer, socklen_t(INET_ADDRSTRLEN))
-                        return String(cString: buffer)
+                        return baseAddress.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { addr in
+                            var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                            var sinAddr = addr.pointee.sin_addr
+                            inet_ntop(AF_INET, &sinAddr, &buffer, socklen_t(INET_ADDRSTRLEN))
+                            return String(cString: buffer)
+                        }
                     }
                     return nil
                 }
