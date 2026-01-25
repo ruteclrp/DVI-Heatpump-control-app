@@ -103,7 +103,7 @@ struct ContentView: View {
             .onDisappear {
                 bridgeConfig.stopDiscovery()
             }
-            .onChange(of: bridgeConfig.discoveredBridges) { bridges in
+            .onChange(of: bridgeConfig.discoveredBridges) {
                 // Auto-connect if we find the saved bridge and haven't already connected
                 if !hasAutoConnected && bridgeConfig.shouldAutoConnect() {
                     hasAutoConnected = true
@@ -113,15 +113,18 @@ struct ContentView: View {
                     }
                 }
             }
-            .onChange(of: bridgeConfig.isOnLocalNetwork) { _ in
-                // When network status changes, update the active URL
-                if showWebView, let activeURL = bridgeConfig.activeURL {
-                    manualAddress = activeURL.absoluteString
-                    reloadTrigger = true
+            .onChange(of: bridgeConfig.rawAddress) {
+                // Sync the manual address field with the active URL whenever it changes
+                if let activeAddress = bridgeConfig.rawAddress {
+                    manualAddress = activeAddress
+                    // If web view is showing, trigger reload
+                    if showWebView {
+                        reloadTrigger = true
+                    }
                 }
             }
-            .onChange(of: scannedCode) { newValue in
-                if let code = newValue {
+            .onChange(of: scannedCode) {
+                if let code = scannedCode {
                     manualAddress = code
                     bridgeConfig.saveTunnelURL(code)
                     attemptConnection()
@@ -135,25 +138,41 @@ struct ContentView: View {
             .sheet(isPresented: $showWebView) {
                 NavigationView {
                     if let url = bridgeConfig.normalizedURL {
-                        SidecarWebView(url: url, reloadTrigger: $reloadTrigger)
-                            .navigationTitle("Sidecar")
-                            .navigationBarTitleDisplayMode(.inline)
-                            .toolbar {
+                        VStack(spacing: 0) {
+                            // Connection status indicator
+                            HStack {
+                                Image(systemName: bridgeConfig.isOnLocalNetwork ? "wifi" : "globe")
+                                    .foregroundColor(bridgeConfig.isOnLocalNetwork ? .green : .blue)
+                                    .font(.system(size: 14))
+                                Text(bridgeConfig.isOnLocalNetwork ? "Connected via Local Network" : "Connected via Remote Tunnel")
+                                    .font(.subheadline)
+                                    .foregroundColor(.primary)
+                                Spacer()
+                            }
+                            .padding()
+                            .background(bridgeConfig.isOnLocalNetwork ? Color.green.opacity(0.1) : Color.blue.opacity(0.1))
+                            .border(bridgeConfig.isOnLocalNetwork ? Color.green.opacity(0.3) : Color.blue.opacity(0.3), width: 0.5)
+                            
+                            SidecarWebView(url: url, reloadTrigger: $reloadTrigger)
+                        }
+                        .navigationTitle("Sidecar")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
 
-                                // Change IP / Close
-                                ToolbarItem(placement: .navigationBarLeading) {
-                                    Button("Change Address") {
-                                        showWebView = false
-                                    }
-                                }
-
-                                // Reload button
-                                ToolbarItem(placement: .navigationBarTrailing) {
-                                    Button("Reload") {
-                                        reloadTrigger = true
-                                    }
+                            // Change IP / Close
+                            ToolbarItem(placement: .navigationBarLeading) {
+                                Button("Change Address") {
+                                    showWebView = false
                                 }
                             }
+
+                            // Reload button
+                            ToolbarItem(placement: .navigationBarTrailing) {
+                                Button("Reload") {
+                                    reloadTrigger = true
+                                }
+                            }
+                        }
                     } else {
                         Text("Invalid URL")
                             .foregroundColor(.red)

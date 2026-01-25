@@ -63,17 +63,47 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
 
         return URL(string: "https://\(raw)")
     }
+    
+    // Check if the current URL is a local address (IP or .local hostname)
+    private var isCurrentURLLocal: Bool {
+        guard let raw = rawAddress?.trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
+        
+        // Check if it's an IP address
+        if raw.range(of: #"^https?://\d{1,3}(\.\d{1,3}){3}"#, options: .regularExpression) != nil {
+            return true
+        }
+        
+        // Check if it's a .local address
+        if raw.contains(".local") {
+            return true
+        }
+        
+        // Check if it's just an IP without protocol
+        if raw.range(of: #"^\d{1,3}(\.\d{1,3}){3}$"#, options: .regularExpression) != nil {
+            return true
+        }
+        
+        // Otherwise it's likely a tunnel URL (https://domain)
+        return false
+    }
 
     // MARK: - Network Monitoring
     func startNetworkMonitoring() {
         networkMonitor = NWPathMonitor()
         networkMonitor?.pathUpdateHandler = { [weak self] path in
             DispatchQueue.main.async {
-                self?.isOnLocalNetwork = path.status == .satisfied
+                // When network changes, update the active URL (switch between local/tunnel)
                 self?.updateActiveURL()
             }
         }
         networkMonitor?.start(queue: monitorQueue)
+    }
+    
+    private func updateNetworkStatus() {
+        // The indicator should reflect the URL type being used, not just the network type
+        // If using a local address (IP or .local), show "Local Network"
+        // If using a tunnel URL (https://domain), show "Remote Tunnel"
+        isOnLocalNetwork = isCurrentURLLocal
     }
     
     func stopNetworkMonitoring() {
@@ -83,29 +113,39 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     
     // MARK: - URL Selection Logic
     private func updateActiveURL() {
+        guard let path = networkMonitor?.currentPath else { return }
+        let onWiFi = path.usesInterfaceType(.wifi)
+        
         // Find the saved bridge if we have one
         if let savedName = savedBridgeName,
            let savedBridge = discoveredBridges.first(where: { $0.name == savedName || $0.tunnelURL == savedTunnelURL }) {
-            // If on local network and we discovered the bridge, use local URL
-            if isOnLocalNetwork {
+            // If on WiFi, use local URL
+            if onWiFi {
                 activeURL = URL(string: savedBridge.localAddress)
                 rawAddress = savedBridge.localAddress
                 print("Switching to local URL: \(savedBridge.localAddress)")
             } else if let tunnelURL = savedBridge.tunnelURL {
-                // Not on local network, use tunnel URL
+                // Not on WiFi, use tunnel URL
                 activeURL = URL(string: tunnelURL)
                 rawAddress = tunnelURL
                 print("Switching to tunnel URL: \(tunnelURL)")
             }
         } else if let tunnelURL = savedTunnelURL {
-            // Fallback to saved tunnel URL if bridge not discovered
-            activeURL = normalizedURL
-            rawAddress = tunnelURL
+            // Fallback: if we have a saved tunnel URL, use it (especially when on cellular)
+            if !onWiFi {
+                activeURL = normalizedURL
+                rawAddress = tunnelURL
+                print("Using saved tunnel URL: \(tunnelURL)")
+            }
         }
+        
+        // Update network status after URL changes
+        updateNetworkStatus()
     }
     
     // MARK: - Discovery with NetService
     func startDiscovery() {
+        print("Starting bridge discovery...")
         browser = NetServiceBrowser()
         browser?.delegate = self
         browser?.searchForServices(ofType: "_dvi-bridge._tcp.", inDomain: "local.")
@@ -203,7 +243,19 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     private func updateDiscoveredBridges() {
         DispatchQueue.main.async {
             self.discoveredBridges = Array(self.discoveredServicesMap.values)
+            print("Discovered bridges updated: \(self.discoveredBridges.count) bridges")
+            
+            // If we have a saved tunnel URL but no saved bridge name,
+            // try to match it with a discovered bridge
+            if self.savedTunnelURL != nil && self.savedBridgeName == nil {
+                if let matchingBridge = self.discoveredBridges.first(where: { $0.tunnelURL == self.savedTunnelURL }) {
+                    print("Auto-linking discovered bridge \(matchingBridge.name) to saved tunnel URL")
+                    self.savedBridgeName = matchingBridge.name
+                }
+            }
+            
             self.updateActiveURL()
+            self.updateNetworkStatus()
         }
     }
 
