@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Camera access is required to scan QR codes for bridge configuration</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Local network access is required to discover DVI bridges on your WiFi network</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_dvi-bridge._tcp</string>
+	</array>
+</dict>
+</plist>
