@@ -13,12 +13,17 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     @Published var discoveredBridges: [DiscoveredBridge] = []
     @Published var isOnLocalNetwork: Bool = false
     @Published var activeURL: URL? = nil
+    @Published var isVerifyingConnection: Bool = false
+    @Published var currentNetworkType: String = "Unknown"  // "WiFi", "Cellular", "Other"
     
     private var browser: NetServiceBrowser?
     private var resolvingServices: Set<NetService> = []
     private var discoveredServicesMap: [String: DiscoveredBridge] = [:]
     private var networkMonitor: NWPathMonitor?
     private var monitorQueue = DispatchQueue(label: "NetworkMonitor")
+    private var healthCheckTimer: Timer?
+    private var discoveryRetryTimer: Timer?
+    private var lastNetworkType: NWInterface.InterfaceType?
     
     // Store saved bridge info
     private var savedTunnelURL: String? {
@@ -89,31 +94,269 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
 
     // MARK: - Network Monitoring
     func startNetworkMonitoring() {
+        // Cancel existing monitor if any
+        networkMonitor?.cancel()
+        
         networkMonitor = NWPathMonitor()
         networkMonitor?.pathUpdateHandler = { [weak self] path in
+            guard let self = self else { return }
+            let currentType = self.getCurrentInterfaceType(path: path)
+            let networkChanged = currentType != self.lastNetworkType
+            
+            if let current = currentType {
+                print("Network path update - Type: \(current), Changed: \(networkChanged)")
+            }
+            
+            let previousType = self.lastNetworkType
+            self.lastNetworkType = currentType
+            
             DispatchQueue.main.async {
-                // When network changes, update the active URL (switch between local/tunnel)
-                self?.updateActiveURL()
+                if networkChanged && currentType != nil {
+                    print("Network type changed from \(String(describing: previousType)) to \(String(describing: currentType)), forcing switch...")
+                    // Update network status immediately
+                    self.updateNetworkStatus()
+                    // When network changes, force verify and switch
+                    self.verifyAndUpdateActiveURL(forceSwitch: true)
+                } else {
+                    self.updateNetworkStatus()
+                    self.updateActiveURL()
+                }
             }
         }
         networkMonitor?.start(queue: monitorQueue)
+        
+        // Start periodic health checks if not already running
+        if healthCheckTimer == nil {
+            startHealthChecks()
+        }
+    }
+    
+    private func getCurrentInterfaceType(path: NWPath) -> NWInterface.InterfaceType? {
+        if path.usesInterfaceType(.wifi) { return .wifi }
+        if path.usesInterfaceType(.cellular) { return .cellular }
+        if path.usesInterfaceType(.wiredEthernet) { return .wiredEthernet }
+        return nil
     }
     
     private func updateNetworkStatus() {
-        // The indicator should reflect the URL type being used, not just the network type
-        // If using a local address (IP or .local), show "Local Network"
-        // If using a tunnel URL (https://domain), show "Remote Tunnel"
-        isOnLocalNetwork = isCurrentURLLocal
+        // Update based on ACTUAL network type, not URL type
+        guard let path = networkMonitor?.currentPath else {
+            isOnLocalNetwork = false
+            currentNetworkType = "Unknown"
+            return
+        }
+        
+        let onWiFi = path.usesInterfaceType(.wifi)
+        isOnLocalNetwork = onWiFi
+        
+        if path.usesInterfaceType(.wifi) {
+            currentNetworkType = "WiFi"
+        } else if path.usesInterfaceType(.cellular) {
+            currentNetworkType = "Cellular"
+        } else if path.usesInterfaceType(.wiredEthernet) {
+            currentNetworkType = "Ethernet"
+        } else {
+            currentNetworkType = "Other"
+        }
+        
+        print("Network status updated: \(currentNetworkType), isOnLocalNetwork: \(isOnLocalNetwork)")
     }
     
     func stopNetworkMonitoring() {
         networkMonitor?.cancel()
         networkMonitor = nil
+        stopHealthChecks()
+        stopDiscoveryRetry()
+    }
+    
+    // MARK: - Health Checking
+    func startHealthChecks() {
+        // Check connection health every 10 seconds
+        healthCheckTimer?.invalidate()
+        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+            self?.verifyCurrentConnection()
+        }
+        print("✅ Health checks started")
+    }
+    
+    func stopHealthChecks() {
+        healthCheckTimer?.invalidate()
+        healthCheckTimer = nil
+        print("⏹️ Health checks stopped")
+    }
+    
+    private func verifyCurrentConnection() {
+        guard let urlString = rawAddress,
+              let url = URL(string: urlString.hasPrefix("http") ? urlString : "http://\(urlString)") else {
+            return
+        }
+        
+        // Don't try to verify local addresses when not on WiFi
+        guard let path = networkMonitor?.currentPath else { return }
+        let onWiFi = path.usesInterfaceType(.wifi)
+        
+        if isCurrentURLLocal && !onWiFi {
+            print("⏭️ Skipping health check - local URL on non-WiFi network")
+            // Try to recover by switching to tunnel
+            attemptConnectionRecovery()
+            return
+        }
+        
+        // Quick HEAD request to check if connection is alive
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = 3.0
+        
+        URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+            DispatchQueue.main.async {
+                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode < 400 {
+                    // Connection is good
+                    return
+                } else if error != nil {
+                    // Connection failed, try to switch if available
+                    print("Health check failed for \(urlString), attempting recovery...")
+                    self?.attemptConnectionRecovery()
+                }
+            }
+        }.resume()
+    }
+    
+    private func attemptConnectionRecovery() {
+        guard let savedName = savedBridgeName,
+              let savedBridge = discoveredBridges.first(where: { $0.name == savedName }) else {
+            return
+        }
+        
+        // Try switching to the alternate connection method
+        if isOnLocalNetwork, let tunnel = savedBridge.tunnelURL {
+            print("Local connection failed, trying tunnel: \(tunnel)")
+            verifyAndSwitchURL(tunnel, fallback: nil, timeout: 3.0)
+        } else {
+            print("Tunnel connection failed, trying local: \(savedBridge.localAddress)")
+            verifyAndSwitchURL(savedBridge.localAddress, fallback: savedBridge.tunnelURL, timeout: 3.0)
+        }
     }
     
     // MARK: - URL Selection Logic
     func checkNetworkAndUpdateURL() {
-        updateActiveURL()
+        // Force a fresh network check by briefly stopping and restarting monitor
+        print("🌐 checkNetworkAndUpdateURL() called")
+        print("🌐 Current rawAddress: \(rawAddress ?? "nil")")
+        print("Forcing fresh network state check...")
+        networkMonitor?.cancel()
+        
+        // Create fresh monitor to get current network state
+        let freshMonitor = NWPathMonitor()
+        let semaphore = DispatchSemaphore(value: 0)
+        var detectedPath: NWPath?
+        
+        freshMonitor.pathUpdateHandler = { path in
+            detectedPath = path
+            semaphore.signal()
+        }
+        freshMonitor.start(queue: DispatchQueue.global())
+        
+        // Wait up to 1 second for path update
+        _ = semaphore.wait(timeout: .now() + 1.0)
+        freshMonitor.cancel()
+        
+        // Restart our main monitor
+        DispatchQueue.main.async { [weak self] in
+            self?.startNetworkMonitoring()
+            
+            // Update network status first
+            self?.updateNetworkStatus()
+            
+            // Now force update with the detected network state
+            if let path = detectedPath {
+                let onWiFi = path.usesInterfaceType(.wifi)
+                let onCellular = path.usesInterfaceType(.cellular)
+                print("Fresh network check - WiFi: \(onWiFi), Cellular: \(onCellular)")
+                self?.forceUpdateForNetworkType(onWiFi: onWiFi)
+            } else {
+                self?.verifyAndUpdateActiveURL(forceSwitch: true)
+            }
+        }
+    }
+    
+    private func forceUpdateForNetworkType(onWiFi: Bool) {
+        print("🔄 forceUpdateForNetworkType - onWiFi: \(onWiFi)")
+        print("🔄 Discovered bridges: \(discoveredBridges.count)")
+        
+        // If not on WiFi, clear discovered bridges since they're not reachable
+        if !onWiFi && !discoveredBridges.isEmpty {
+            print("🔄 Not on WiFi - clearing discovered bridges cache")
+            discoveredBridges.removeAll()
+        }
+        
+        // Find the saved bridge if we have one
+        if let savedName = savedBridgeName,
+           let savedBridge = discoveredBridges.first(where: { $0.name == savedName || $0.tunnelURL == savedTunnelURL }) {
+            
+            print("🔄 Found cached bridge: \(savedBridge.name)")
+            
+            if onWiFi {
+                let newURL = savedBridge.localAddress
+                print("→ Forcing switch to LOCAL: \(newURL)")
+                verifyAndSwitchURL(newURL, fallback: savedBridge.tunnelURL, timeout: 2.0)
+            } else if let tunnelURL = savedBridge.tunnelURL {
+                print("→ Forcing switch to TUNNEL: \(tunnelURL) (on cellular/non-WiFi)")
+                print("  🔍 Current rawAddress BEFORE: \(rawAddress ?? "nil")")
+                print("  🔍 Discovered bridges count: \(discoveredBridges.count)")
+                // On cellular, just switch to tunnel immediately without verification
+                // Local address won't work anyway
+                print("  → Switching immediately to tunnel URL without verification")
+                activeURL = URL(string: tunnelURL)
+                rawAddress = tunnelURL
+                print("  🔍 rawAddress AFTER assignment: \(rawAddress ?? "nil")")
+                updateNetworkStatus()
+                // Force objectWillChange to notify observers
+                objectWillChange.send()
+                print("  ✅ Switched! rawAddress is now: \(tunnelURL)")
+            }
+        } else if let tunnelURL = savedTunnelURL {
+            // No discovered bridge - use tunnel URL whether on WiFi or not
+            // (could be on different WiFi network, or cellular)
+            print("→ Using saved tunnel URL (bridge not discovered, on \(onWiFi ? "WiFi" : "cellular")): \(tunnelURL)")
+            activeURL = URL(string: tunnelURL)
+            rawAddress = tunnelURL
+            updateNetworkStatus()
+            objectWillChange.send()
+        } else {
+            print("❌ No saved bridge or tunnel URL!")
+        }
+    }
+    
+    private func verifyAndUpdateActiveURL(forceSwitch: Bool = false) {
+        guard let path = networkMonitor?.currentPath else { return }
+        let onWiFi = path.usesInterfaceType(.wifi)
+        let onCellular = path.usesInterfaceType(.cellular)
+        
+        print("Network check - WiFi: \(onWiFi), Cellular: \(onCellular), Current URL: \(rawAddress ?? "none")")
+        
+        // Find the saved bridge if we have one
+        if let savedName = savedBridgeName,
+           let savedBridge = discoveredBridges.first(where: { $0.name == savedName || $0.tunnelURL == savedTunnelURL }) {
+            // If on WiFi, prefer local URL (verify it first)
+            if onWiFi {
+                let newURL = savedBridge.localAddress
+                if rawAddress != newURL || forceSwitch {
+                    print("Network is WiFi, switching to local URL: \(newURL)")
+                    verifyAndSwitchURL(newURL, fallback: savedBridge.tunnelURL, timeout: 3.0)
+                }
+            } else if let tunnelURL = savedBridge.tunnelURL {
+                // Not on WiFi (cellular or other), prefer tunnel URL (verify it first)
+                if rawAddress != tunnelURL || forceSwitch {
+                    print("Network is NOT WiFi (cellular/other), switching to tunnel URL: \(tunnelURL)")
+                    verifyAndSwitchURL(tunnelURL, fallback: savedBridge.localAddress, timeout: 3.0)
+                }
+            }
+        } else if let tunnelURL = savedTunnelURL {
+            // Fallback: if we have a saved tunnel URL, use it (especially when on cellular)
+            if !onWiFi && rawAddress != tunnelURL {
+                verifyAndSwitchURL(tunnelURL, fallback: nil, timeout: 3.0)
+            }
+        }
     }
     
     private func updateActiveURL() {
@@ -129,14 +372,16 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
                 if rawAddress != newURL {
                     activeURL = URL(string: newURL)
                     rawAddress = newURL
-                    print("Switching to local URL: \(newURL)")
+                    updateNetworkStatus()
+                    print("Switched to local URL: \(newURL)")
                 }
             } else if let tunnelURL = savedBridge.tunnelURL {
                 // Not on WiFi, use tunnel URL
                 if rawAddress != tunnelURL {
                     activeURL = URL(string: tunnelURL)
                     rawAddress = tunnelURL
-                    print("Switching to tunnel URL: \(tunnelURL)")
+                    updateNetworkStatus()
+                    print("Switched to tunnel URL: \(tunnelURL)")
                 }
             }
         } else if let tunnelURL = savedTunnelURL {
@@ -144,20 +389,78 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
             if !onWiFi && rawAddress != tunnelURL {
                 activeURL = normalizedURL
                 rawAddress = tunnelURL
+                updateNetworkStatus()
                 print("Using saved tunnel URL: \(tunnelURL)")
             }
         }
+    }
+    
+    private func verifyAndSwitchURL(_ urlString: String, fallback: String? = nil, timeout: TimeInterval = 3.0) {
+        guard let url = URL(string: urlString.hasPrefix("http") ? urlString : "http://\(urlString)") else {
+            return
+        }
         
-        // Update network status after URL changes
-        updateNetworkStatus()
+        isVerifyingConnection = true
+        
+        // Try to connect with a short timeout
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = timeout
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData  // Don't use cache
+        
+        URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+            DispatchQueue.main.async {
+                self?.isVerifyingConnection = false
+                
+                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode < 400 {
+                    // Connection verified, switch to it
+                    print("✓ Connection verified for \(urlString), switching...")
+                    self?.activeURL = URL(string: urlString)
+                    self?.rawAddress = urlString
+                    self?.updateNetworkStatus()
+                } else {
+                    print("✗ Connection verification failed for \(urlString): \(error?.localizedDescription ?? "unknown")")
+                    
+                    // If verification failed and we have a fallback, try it immediately
+                    if let fallbackURL = fallback, fallbackURL != urlString {
+                        print("  → Immediately trying fallback URL: \(fallbackURL)")
+                        // Try fallback without further fallback to avoid infinite loop
+                        self?.verifyAndSwitchURL(fallbackURL, fallback: nil, timeout: 3.0)
+                    } else {
+                        // No fallback, but still switch - update network status to show current network type
+                        print("  → No fallback available, switching to \(urlString) anyway")
+                        self?.activeURL = URL(string: urlString)
+                        self?.rawAddress = urlString
+                        self?.updateNetworkStatus()
+                    }
+                }
+            }
+        }.resume()
     }
     
     // MARK: - Discovery with NetService
     func startDiscovery() {
         print("Starting bridge discovery...")
+        
+        // Only run discovery if on WiFi - mDNS doesn't work on cellular
+        guard let path = networkMonitor?.currentPath, path.usesInterfaceType(.wifi) else {
+            print("Not on WiFi - skipping mDNS discovery (cellular/other network)")
+            // Stop any existing retry timer since we're not on WiFi
+            stopDiscoveryRetry()
+            return
+        }
+        
+        // Force stop any existing discovery
+        if browser != nil {
+            stopDiscovery()
+        }
+        
         browser = NetServiceBrowser()
         browser?.delegate = self
         browser?.searchForServices(ofType: "_dvi-bridge._tcp.", inDomain: "local.")
+        
+        // Set up retry mechanism if discovery doesn't find anything within 5 seconds
+        scheduleDiscoveryRetry()
     }
     
     func stopDiscovery() {
@@ -169,7 +472,53 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
             service.stop()
         }
         resolvingServices.removeAll()
-        discoveredServicesMap.removeAll()
+        // Don't clear discovered services map - keep them cached
+        stopDiscoveryRetry()
+    }
+    
+    private func scheduleDiscoveryRetry() {
+        stopDiscoveryRetry()
+        
+        // Only schedule retry if on WiFi - discovery won't work on cellular
+        guard let path = networkMonitor?.currentPath, path.usesInterfaceType(.wifi) else {
+            print("Not on WiFi - skipping discovery retry")
+            return
+        }
+        
+        discoveryRetryTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            
+            // Check if still on WiFi before retrying
+            guard let path = self.networkMonitor?.currentPath, path.usesInterfaceType(.wifi) else {
+                print("No longer on WiFi - stopping discovery retry")
+                self.stopDiscoveryRetry()
+                return
+            }
+            
+            if self.discoveredBridges.isEmpty {
+                print("No bridges found on WiFi, retrying discovery...")
+                self.forceRestartDiscovery()
+            } else {
+                // Found bridges, stop retrying
+                self.stopDiscoveryRetry()
+            }
+        }
+    }
+    
+    private func stopDiscoveryRetry() {
+        discoveryRetryTimer?.invalidate()
+        discoveryRetryTimer = nil
+    }
+    
+    private func forceRestartDiscovery() {
+        browser?.stop()
+        resolvingServices.forEach { $0.stop() }
+        resolvingServices.removeAll()
+        
+        // Restart immediately
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.browser?.searchForServices(ofType: "_dvi-bridge._tcp.", inDomain: "local.")
+        }
     }
 
     // MARK: - NetServiceBrowserDelegate
@@ -290,5 +639,6 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     
     deinit {
         stopNetworkMonitoring()
+        stopDiscovery()
     }
 }

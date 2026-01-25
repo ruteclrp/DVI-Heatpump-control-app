@@ -98,6 +98,13 @@ struct ContentView: View {
             }
             .navigationTitle("DVI Heatpump")
             .onAppear {
+                // Sync manual address with current rawAddress on appear
+                if let currentAddress = bridgeConfig.rawAddress {
+                    print("📝 ContentView: onAppear - syncing manualAddress to: \(currentAddress)")
+                    manualAddress = currentAddress
+                } else {
+                    print("📝 ContentView: onAppear - rawAddress is nil")
+                }
                 bridgeConfig.startDiscovery()
             }
             .onDisappear {
@@ -115,12 +122,19 @@ struct ContentView: View {
             }
             .onChange(of: bridgeConfig.rawAddress) {
                 // Sync the manual address field with the active URL whenever it changes
+                print("📝 ContentView: onChange(rawAddress) triggered")
                 if let activeAddress = bridgeConfig.rawAddress {
+                    print("📝 ContentView: rawAddress changed to \(activeAddress)")
+                    print("📝 ContentView: manualAddress WAS: \(manualAddress)")
                     manualAddress = activeAddress
+                    print("📝 ContentView: manualAddress NOW: \(manualAddress)")
                     // If web view is showing, trigger reload
                     if showWebView {
+                        print("📝 ContentView: Web view is showing, triggering reload")
                         reloadTrigger = true
                     }
+                } else {
+                    print("📝 ContentView: rawAddress is nil")
                 }
             }
             .onChange(of: bridgeConfig.activeURL) {
@@ -148,12 +162,20 @@ struct ContentView: View {
                         VStack(spacing: 0) {
                             // Connection status indicator
                             HStack {
-                                Image(systemName: bridgeConfig.isOnLocalNetwork ? "wifi" : "globe")
-                                    .foregroundColor(bridgeConfig.isOnLocalNetwork ? .green : .blue)
-                                    .font(.system(size: 14))
-                                Text(bridgeConfig.isOnLocalNetwork ? "Connected via Local Network" : "Connected via Remote Tunnel")
-                                    .font(.subheadline)
-                                    .foregroundColor(.primary)
+                                if bridgeConfig.isVerifyingConnection {
+                                    ProgressView()
+                                        .scaleEffect(0.8)
+                                    Text("Verifying connection...")
+                                        .font(.subheadline)
+                                        .foregroundColor(.secondary)
+                                } else {
+                                    Image(systemName: bridgeConfig.isOnLocalNetwork ? "wifi" : "antenna.radiowaves.left.and.right")
+                                        .foregroundColor(bridgeConfig.isOnLocalNetwork ? .green : .blue)
+                                        .font(.system(size: 14))
+                                    Text(bridgeConfig.isOnLocalNetwork ? "WiFi - Local Network" : "\(bridgeConfig.currentNetworkType) - Remote Tunnel")
+                                        .font(.subheadline)
+                                        .foregroundColor(.primary)
+                                }
                                 Spacer()
                             }
                             .padding()
@@ -170,6 +192,11 @@ struct ContentView: View {
                             ToolbarItem(placement: .navigationBarLeading) {
                                 Button("Change Address") {
                                     showWebView = false
+                                    // Sync address when returning to ContentView
+                                    if let currentAddress = bridgeConfig.rawAddress {
+                                        manualAddress = currentAddress
+                                        print("📝 WebView closing - synced manualAddress to: \(currentAddress)")
+                                    }
                                 }
                             }
 

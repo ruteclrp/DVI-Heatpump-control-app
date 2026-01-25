@@ -19,12 +19,24 @@ struct DVIHeatpumpApp: App {
         }
         .onChange(of: scenePhase) { oldPhase, newPhase in
             if newPhase == .active {
-                // Restart discovery when app becomes active
-                bridgeConfig.startDiscovery()
-                // Force network status update
-                bridgeConfig.checkNetworkAndUpdateURL()
+                print("=== App became ACTIVE ===")
+                // Restart health checks
+                bridgeConfig.startHealthChecks()
+                // Force complete restart of discovery when app becomes active
+                bridgeConfig.stopDiscovery()
+                // Small delay to ensure clean restart
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    bridgeConfig.startDiscovery()
+                }
+                // Force fresh network state check (this restarts network monitor)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    bridgeConfig.checkNetworkAndUpdateURL()
+                }
             } else if newPhase == .background {
-                // Stop discovery when going to background
+                print("=== App going to BACKGROUND ===")
+                // Stop health checks to save battery
+                bridgeConfig.stopHealthChecks()
+                // Stop discovery when going to background to save battery
                 bridgeConfig.stopDiscovery()
             }
         }
