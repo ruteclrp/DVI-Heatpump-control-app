@@ -292,18 +292,23 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     
     private func updateNetworkStatus() {
         // Update based on ACTUAL network type, not URL type
-        guard let path = networkMonitor?.currentPath else {
-            isOnLocalNetwork = false
-            currentNetworkType = "Unknown"
-            return
+        // Use the stored lastNetworkType instead of re-checking path to avoid race conditions
+        guard let detectedType = lastNetworkType else {
+            // Fallback: check path if lastNetworkType is not set
+            guard let path = networkMonitor?.currentPath else {
+                isOnLocalNetwork = false
+                currentNetworkType = "Unknown"
+                return
+            }
+            lastNetworkType = getCurrentInterfaceType(path: path)
         }
         
-        // Determine network status based on interface type, home network scope, AND bridge discovery
-        if path.usesInterfaceType(.cellular) {
+        // Determine network status based on detected interface type, home network scope, AND bridge discovery
+        if detectedType == .cellular {
             // Cellular network - always uses remote tunnel
             currentNetworkType = "Cellular"
             isOnLocalNetwork = false
-        } else if path.usesInterfaceType(.wifi) {
+        } else if detectedType == .wifi {
             // WiFi network - check if it's home network with discovered bridge
             if isOnHomeNetworkScope() && isBridgeDiscoveredLocally() {
                 currentNetworkType = "WiFi"
@@ -313,7 +318,7 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
                 currentNetworkType = "WiFi"
                 isOnLocalNetwork = false
             }
-        } else if path.usesInterfaceType(.wiredEthernet) {
+        } else if detectedType == .wiredEthernet {
             // Ethernet - check scope similar to WiFi
             if isOnHomeNetworkScope() && isBridgeDiscoveredLocally() {
                 currentNetworkType = "Ethernet"
