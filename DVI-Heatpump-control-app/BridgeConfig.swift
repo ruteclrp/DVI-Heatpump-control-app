@@ -24,6 +24,14 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     private var healthCheckTimer: Timer?
     private var discoveryRetryTimer: Timer?
     private var lastNetworkType: NWInterface.InterfaceType?
+    private var networkConnectionTime: Date?
+    private var discoveryStopTimer: Timer?
+    private var consecutiveHealthCheckFailures: Int = 0
+    private var healthCheckBackoffInterval: TimeInterval = 10.0
+    private var lastHealthCheckTime: Date?
+    private var cachedDeviceIP: String?
+    private var cachedNetworkScope: String?
+    private var lastNetworkInterfaceCheck: Date?
     
     // Store saved bridge info
     private var savedTunnelURL: String? {
@@ -33,6 +41,10 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     private var savedBridgeName: String? {
         get { UserDefaults.standard.string(forKey: "savedBridgeName") }
         set { UserDefaults.standard.set(newValue, forKey: "savedBridgeName") }
+    }
+    private var homeNetworkScope: String? {
+        get { UserDefaults.standard.string(forKey: "homeNetworkScope") }
+        set { UserDefaults.standard.set(newValue, forKey: "homeNetworkScope") }
     }
     
     struct DiscoveredBridge: Identifiable, Equatable {
@@ -91,6 +103,124 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         // Otherwise it's likely a tunnel URL (https://domain)
         return false
     }
+    
+    // MARK: - IP Scope Detection
+    
+    /// Extract network scope (first 3 octets) from an IP address string
+    /// e.g., "192.168.1.100" -> "192.168.1"
+    private func extractNetworkScope(from ipAddress: String) -> String? {
+        let pattern = #"^(\d{1,3}\.\d{1,3}\.\d{1,3})"#
+        if let range = ipAddress.range(of: pattern, options: .regularExpression) {
+            return String(ipAddress[range])
+        }
+        return nil
+    }
+    
+    /// Get the current device's IP address on WiFi (cached)
+    private func getCurrentDeviceIPAddress() -> String? {
+        // Cache IP address for 5 seconds to avoid expensive system calls
+        if let lastCheck = lastNetworkInterfaceCheck,
+           Date().timeIntervalSince(lastCheck) < 5.0,
+           let cached = cachedDeviceIP {
+            return cached
+        }
+        
+        var address: String?
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        
+        guard getifaddrs(&ifaddr) == 0 else { return nil }
+        defer { freeifaddrs(ifaddr) }
+        
+        var ptr = ifaddr
+        while ptr != nil {
+            defer { ptr = ptr?.pointee.ifa_next }
+            
+            guard let interface = ptr else { continue }
+            let addrFamily = interface.pointee.ifa_addr.pointee.sa_family
+            
+            if addrFamily == UInt8(AF_INET) {
+                let name = String(cString: interface.pointee.ifa_name)
+                // Look for WiFi interface (en0 on iOS)
+                if name == "en0" {
+                    var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                    getnameinfo(interface.pointee.ifa_addr,
+                              socklen_t(interface.pointee.ifa_addr.pointee.sa_len),
+                              &hostname,
+                              socklen_t(hostname.count),
+                              nil,
+                              socklen_t(0),
+                              NI_NUMERICHOST)
+                    address = String(cString: hostname)
+                    break
+                }
+            }
+        }
+        
+        // Update cache
+        cachedDeviceIP = address
+        lastNetworkInterfaceCheck = Date()
+        return address
+    }
+    
+    /// Check if current network matches home network scope (cached)
+    private func isOnHomeNetworkScope() -> Bool {
+        guard let homeScope = homeNetworkScope else {
+            return false
+        }
+        
+        // Use cached scope if available and recent
+        if let lastCheck = lastNetworkInterfaceCheck,
+           Date().timeIntervalSince(lastCheck) < 5.0,
+           let cached = cachedNetworkScope {
+            let matches = cached == homeScope
+            return matches
+        }
+        
+        // Calculate and cache
+        guard let currentIP = getCurrentDeviceIPAddress(),
+              let currentScope = extractNetworkScope(from: currentIP) else {
+            return false
+        }
+        
+        cachedNetworkScope = currentScope
+        let matches = currentScope == homeScope
+        print("🏠 Network scope check: current=\(currentScope), home=\(homeScope), matches=\(matches)")
+        return matches
+    }
+    
+    /// Check if bridge has been discovered locally (not just tunnel)
+    private func isBridgeDiscoveredLocally() -> Bool {
+        // Check if we have a saved bridge name that's in discovered bridges
+        if let savedName = savedBridgeName {
+            let isDiscovered = discoveredBridges.contains(where: { $0.name == savedName })
+            if isDiscovered {
+                print("✅ Bridge '\(savedName)' is discovered locally")
+                return true
+            }
+        }
+        
+        // Also check if current rawAddress is pointing to a local IP/hostname
+        if isCurrentURLLocal && rawAddress != nil {
+            print("✅ Currently using local bridge address: \(rawAddress!)")
+            return true
+        }
+        
+        print("❌ Bridge not discovered locally")
+        return false
+    }
+    
+    /// Save the home network scope from a bridge's local IP address
+    private func saveHomeNetworkScope(from localAddress: String) {
+        // Extract IP from URL like "http://192.168.1.100:5000"
+        let ipPattern = #"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})"#
+        if let range = localAddress.range(of: ipPattern, options: .regularExpression) {
+            let ipAddress = String(localAddress[range])
+            if let scope = extractNetworkScope(from: ipAddress) {
+                homeNetworkScope = scope
+                print("🏠 Saved home network scope: \(scope)")
+            }
+        }
+    }
 
     // MARK: - Network Monitoring
     func startNetworkMonitoring() {
@@ -103,32 +233,54 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
             let currentType = self.getCurrentInterfaceType(path: path)
             let networkChanged = currentType != self.lastNetworkType
             
+            // Skip processing if network hasn't actually changed
+            // OS fires path updates frequently for signal quality, routing changes, etc.
+            // We only care about actual network type changes (WiFi ↔ Cellular)
+            guard networkChanged else {
+                return
+            }
+            
             if let current = currentType {
-                print("Network path update - Type: \(current), Changed: \(networkChanged)")
+                print("Network type changed to: \(current)")
             }
             
             let previousType = self.lastNetworkType
             self.lastNetworkType = currentType
             
             DispatchQueue.main.async {
-                if networkChanged && currentType != nil {
-                    print("Network type changed from \(String(describing: previousType)) to \(String(describing: currentType)), forcing switch...")
-                    // Update network status immediately
-                    self.updateNetworkStatus()
-                    // When network changes, force verify and switch
-                    self.verifyAndUpdateActiveURL(forceSwitch: true)
+                print("Network type changed from \(String(describing: previousType)) to \(String(describing: currentType)), switching...")
+                // Record network connection time
+                self.networkConnectionTime = Date()
+                
+                // Invalidate network cache on actual network change
+                self.cachedDeviceIP = nil
+                self.cachedNetworkScope = nil
+                self.lastNetworkInterfaceCheck = nil
+                
+                // Update network status immediately
+                self.updateNetworkStatus()
+                
+                // Smart discovery: only if WiFi + matching home scope
+                if path.usesInterfaceType(.wifi) && self.shouldRunDiscovery() {
+                    print("📡 Starting time-limited discovery (30s window)")
+                    self.startSmartDiscovery()
                 } else {
-                    self.updateNetworkStatus()
-                    self.updateActiveURL()
+                    print("⏭️ Skipping discovery - using tunnel (cellular or different network scope)")
+                    // Immediately switch to tunnel for non-home networks
+                    self.switchToTunnelURL()
                 }
+                
+                // When network changes, force verify and switch
+                self.verifyAndUpdateActiveURL(forceSwitch: true)
             }
         }
         networkMonitor?.start(queue: monitorQueue)
         
-        // Start periodic health checks if not already running
-        if healthCheckTimer == nil {
-            startHealthChecks()
-        }
+        // Health checks disabled - unnecessary since:
+        // 1. Network changes handled by OS notifications (instant)
+        // 2. If bridge is down, both local and tunnel fail anyway
+        // 3. No recovery action possible if bridge itself is offline
+        // This saves significant battery by eliminating continuous polling
     }
     
     private func getCurrentInterfaceType(path: NWPath) -> NWInterface.InterfaceType? {
@@ -146,17 +298,33 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
             return
         }
         
-        let onWiFi = path.usesInterfaceType(.wifi)
-        isOnLocalNetwork = onWiFi
-        
-        if path.usesInterfaceType(.wifi) {
-            currentNetworkType = "WiFi"
-        } else if path.usesInterfaceType(.cellular) {
+        // Determine network status based on interface type, home network scope, AND bridge discovery
+        if path.usesInterfaceType(.cellular) {
+            // Cellular network - always uses remote tunnel
             currentNetworkType = "Cellular"
+            isOnLocalNetwork = false
+        } else if path.usesInterfaceType(.wifi) {
+            // WiFi network - check if it's home network with discovered bridge
+            if isOnHomeNetworkScope() && isBridgeDiscoveredLocally() {
+                currentNetworkType = "WiFi"
+                isOnLocalNetwork = true
+            } else {
+                // Either different scope OR same scope but bridge not found
+                currentNetworkType = "WiFi"
+                isOnLocalNetwork = false
+            }
         } else if path.usesInterfaceType(.wiredEthernet) {
-            currentNetworkType = "Ethernet"
+            // Ethernet - check scope similar to WiFi
+            if isOnHomeNetworkScope() && isBridgeDiscoveredLocally() {
+                currentNetworkType = "Ethernet"
+                isOnLocalNetwork = true
+            } else {
+                currentNetworkType = "Ethernet"
+                isOnLocalNetwork = false
+            }
         } else {
             currentNetworkType = "Other"
+            isOnLocalNetwork = false
         }
         
         print("Network status updated: \(currentNetworkType), isOnLocalNetwork: \(isOnLocalNetwork)")
@@ -171,12 +339,20 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     
     // MARK: - Health Checking
     func startHealthChecks() {
-        // Check connection health every 10 seconds
-        healthCheckTimer?.invalidate()
-        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
-            self?.verifyCurrentConnection()
-        }
+        // Start with default interval
+        consecutiveHealthCheckFailures = 0
+        healthCheckBackoffInterval = 10.0
+        scheduleNextHealthCheck()
         print("✅ Health checks started")
+    }
+    
+    private func scheduleNextHealthCheck() {
+        healthCheckTimer?.invalidate()
+        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: healthCheckBackoffInterval, repeats: false) { [weak self] _ in
+            self?.verifyCurrentConnection()
+            // Schedule next check after this one completes
+            self?.scheduleNextHealthCheck()
+        }
     }
     
     func stopHealthChecks() {
@@ -186,21 +362,39 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     }
     
     private func verifyCurrentConnection() {
+        lastHealthCheckTime = Date()
+        
         guard let urlString = rawAddress,
               let url = URL(string: urlString.hasPrefix("http") ? urlString : "http://\(urlString)") else {
             return
         }
         
-        // Don't try to verify local addresses when not on WiFi
         guard let path = networkMonitor?.currentPath else { return }
         let onWiFi = path.usesInterfaceType(.wifi)
         
-        if isCurrentURLLocal && !onWiFi {
-            print("⏭️ Skipping health check - local URL on non-WiFi network")
-            // Try to recover by switching to tunnel
-            attemptConnectionRecovery()
+        // Only do health checks when on home WiFi using local bridge
+        // All other scenarios are handled by network change detection:
+        // - Cellular -> only tunnel available, no point checking
+        // - WiFi with tunnel -> already determined not home network, no need to keep checking
+        // - WiFi goes down -> OS switches to cellular, triggers network change handler
+        
+        if !onWiFi {
+            // Not on WiFi - skip health checks
             return
         }
+        
+        if !isCurrentURLLocal {
+            // On WiFi but using tunnel (not home network) - skip health checks
+            return
+        }
+        
+        if !isOnLocalNetwork {
+            // Not on home network - skip health checks
+            return
+        }
+        
+        // Only reach here if: on home WiFi + using local bridge
+        // Check if local bridge is still responsive
         
         // Quick HEAD request to check if connection is alive
         var request = URLRequest(url: url)
@@ -209,13 +403,32 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         
         URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
             DispatchQueue.main.async {
+                guard let self = self else { return }
+                
                 if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode < 400 {
-                    // Connection is good
-                    return
+                    // Connection is good - reset failure tracking
+                    if self.consecutiveHealthCheckFailures > 0 {
+                        print("✅ Connection recovered after \(self.consecutiveHealthCheckFailures) failures")
+                    }
+                    self.consecutiveHealthCheckFailures = 0
+                    self.healthCheckBackoffInterval = 10.0
                 } else if error != nil {
-                    // Connection failed, try to switch if available
-                    print("Health check failed for \(urlString), attempting recovery...")
-                    self?.attemptConnectionRecovery()
+                    // Connection failed - increase backoff
+                    self.consecutiveHealthCheckFailures += 1
+                    
+                    // Exponential backoff: 10s, 20s, 40s, 60s (cap at 60s)
+                    self.healthCheckBackoffInterval = min(10.0 * pow(2.0, Double(min(self.consecutiveHealthCheckFailures - 1, 2))), 60.0)
+                    
+                    if self.consecutiveHealthCheckFailures <= 3 {
+                        print("⚠️ Health check failed for \(urlString) (failure #\(self.consecutiveHealthCheckFailures)), next check in \(Int(self.healthCheckBackoffInterval))s")
+                        // Try to switch on first few failures
+                        if self.consecutiveHealthCheckFailures <= 2 {
+                            self.attemptConnectionRecovery()
+                        }
+                    } else {
+                        // After 3 failures, stop spamming logs and recovery attempts
+                        print("⏸️ Multiple failures (\(self.consecutiveHealthCheckFailures)), backing off to \(Int(self.healthCheckBackoffInterval))s intervals")
+                    }
                 }
             }
         }.resume()
@@ -439,14 +652,49 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     }
     
     // MARK: - Discovery with NetService
-    func startDiscovery() {
-        print("Starting bridge discovery...")
+    
+    /// Determine if discovery should run based on network scope and timing
+    private func shouldRunDiscovery() -> Bool {
+        // If no home scope saved yet, allow discovery (first-time setup)
+        guard homeNetworkScope != nil else {
+            print("📡 No home network scope saved - allowing first-time discovery")
+            return true
+        }
+        
+        // Check if we're on the home network scope
+        guard isOnHomeNetworkScope() else {
+            print("📡 Not on home network scope - skipping discovery")
+            return false
+        }
+        
+        // Check if we're within 30 seconds of network connection
+        if let connectionTime = networkConnectionTime {
+            let elapsed = Date().timeIntervalSince(connectionTime)
+            if elapsed > 30.0 {
+                print("📡 Discovery window expired (\(Int(elapsed))s > 30s) - skipping")
+                return false
+            }
+            print("📡 Within discovery window (\(Int(elapsed))s / 30s)")
+        }
+        
+        return true
+    }
+    
+    /// Start smart discovery with automatic 30-second timeout
+    private func startSmartDiscovery() {
+        print("Starting smart bridge discovery...")
         
         // Only run discovery if on WiFi - mDNS doesn't work on cellular
         guard let path = networkMonitor?.currentPath, path.usesInterfaceType(.wifi) else {
             print("Not on WiFi - skipping mDNS discovery (cellular/other network)")
-            // Stop any existing retry timer since we're not on WiFi
             stopDiscoveryRetry()
+            return
+        }
+        
+        // Check if we should run discovery
+        guard shouldRunDiscovery() else {
+            print("Smart discovery check failed - using tunnel")
+            switchToTunnelURL()
             return
         }
         
@@ -459,8 +707,26 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         browser?.delegate = self
         browser?.searchForServices(ofType: "_dvi-bridge._tcp.", inDomain: "local.")
         
-        // Set up retry mechanism if discovery doesn't find anything within 5 seconds
-        scheduleDiscoveryRetry()
+        // Set up 30-second hard stop for discovery
+        discoveryStopTimer?.invalidate()
+        discoveryStopTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: false) { [weak self] _ in
+            print("⏱️ 30-second discovery window expired - stopping discovery")
+            self?.stopDiscovery()
+            // If no bridge found, ensure we're using tunnel
+            if self?.discoveredBridges.isEmpty == true {
+                print("No bridges discovered in time window - falling back to tunnel")
+                self?.switchToTunnelURL()
+            }
+        }
+        
+        // Discovery retry disabled - mDNS is expensive and retrying every 5s wastes battery
+        // If bridge isn't found in first scan, it likely won't appear until next network change
+        // Let the OS network change detection handle it instead of continuous polling
+    }
+    
+    func startDiscovery() {
+        // Public method now calls smart discovery
+        startSmartDiscovery()
     }
     
     func stopDiscovery() {
@@ -474,6 +740,10 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         resolvingServices.removeAll()
         // Don't clear discovered services map - keep them cached
         stopDiscoveryRetry()
+        
+        // Stop the 30-second discovery window timer
+        discoveryStopTimer?.invalidate()
+        discoveryStopTimer = nil
     }
     
     private func scheduleDiscoveryRetry() {
@@ -488,9 +758,27 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         discoveryRetryTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             
+            // Check if still within 30-second discovery window
+            if let connectionTime = self.networkConnectionTime {
+                let elapsed = Date().timeIntervalSince(connectionTime)
+                if elapsed > 30.0 {
+                    print("⏱️ Discovery window expired during retry - stopping")
+                    self.stopDiscoveryRetry()
+                    self.stopDiscovery()
+                    return
+                }
+            }
+            
             // Check if still on WiFi before retrying
             guard let path = self.networkMonitor?.currentPath, path.usesInterfaceType(.wifi) else {
                 print("No longer on WiFi - stopping discovery retry")
+                self.stopDiscoveryRetry()
+                return
+            }
+            
+            // Check if should still be discovering based on network scope
+            guard self.shouldRunDiscovery() else {
+                print("Discovery conditions no longer met - stopping retry")
                 self.stopDiscoveryRetry()
                 return
             }
@@ -617,6 +905,20 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         }
     }
 
+    /// Immediately switch to tunnel URL without discovery
+    private func switchToTunnelURL() {
+        guard let tunnelURL = savedTunnelURL else {
+            print("⚠️ No tunnel URL saved to switch to")
+            return
+        }
+        
+        print("🔄 Switching immediately to tunnel: \(tunnelURL)")
+        activeURL = URL(string: tunnelURL)
+        rawAddress = tunnelURL
+        updateNetworkStatus()
+        objectWillChange.send()
+    }
+    
     // MARK: - Persistence
     func saveTunnelURL(_ url: String) {
         savedTunnelURL = url
@@ -628,6 +930,10 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
             savedTunnelURL = tunnelURL
         }
         savedBridgeName = bridge.name
+        
+        // Save home network scope from bridge's local address
+        saveHomeNetworkScope(from: bridge.localAddress)
+        
         updateActiveURL()
     }
     

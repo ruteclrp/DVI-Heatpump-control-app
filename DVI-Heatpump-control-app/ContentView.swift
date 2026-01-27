@@ -172,7 +172,7 @@ struct ContentView: View {
                                     Image(systemName: bridgeConfig.isOnLocalNetwork ? "wifi" : "antenna.radiowaves.left.and.right")
                                         .foregroundColor(bridgeConfig.isOnLocalNetwork ? .green : .blue)
                                         .font(.system(size: 14))
-                                    Text(bridgeConfig.isOnLocalNetwork ? "WiFi - Local Network" : "\(bridgeConfig.currentNetworkType) - Remote Tunnel")
+                                    Text(bridgeConfig.isOnLocalNetwork ? "WiFi - Home Network" : "\(bridgeConfig.currentNetworkType) - Remote Tunnel")
                                         .font(.subheadline)
                                         .foregroundColor(.primary)
                                 }
