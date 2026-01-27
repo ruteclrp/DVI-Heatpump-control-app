@@ -21,14 +21,10 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     private var discoveredServicesMap: [String: DiscoveredBridge] = [:]
     private var networkMonitor: NWPathMonitor?
     private var monitorQueue = DispatchQueue(label: "NetworkMonitor")
-    private var healthCheckTimer: Timer?
     private var discoveryRetryTimer: Timer?
     private var lastNetworkType: NWInterface.InterfaceType?
     private var networkConnectionTime: Date?
     private var discoveryStopTimer: Timer?
-    private var consecutiveHealthCheckFailures: Int = 0
-    private var healthCheckBackoffInterval: TimeInterval = 10.0
-    private var lastHealthCheckTime: Date?
     private var cachedDeviceIP: String?
     private var cachedNetworkScope: String?
     private var lastNetworkInterfaceCheck: Date?
@@ -275,12 +271,6 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
             }
         }
         networkMonitor?.start(queue: monitorQueue)
-        
-        // Health checks disabled - unnecessary since:
-        // 1. Network changes handled by OS notifications (instant)
-        // 2. If bridge is down, both local and tunnel fail anyway
-        // 3. No recovery action possible if bridge itself is offline
-        // This saves significant battery by eliminating continuous polling
     }
     
     private func getCurrentInterfaceType(path: NWPath) -> NWInterface.InterfaceType? {
@@ -293,14 +283,18 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     private func updateNetworkStatus() {
         // Update based on ACTUAL network type, not URL type
         // Use the stored lastNetworkType instead of re-checking path to avoid race conditions
-        guard let detectedType = lastNetworkType else {
+        let detectedType: NWInterface.InterfaceType?
+        if let savedType = lastNetworkType {
+            detectedType = savedType
+        } else {
             // Fallback: check path if lastNetworkType is not set
             guard let path = networkMonitor?.currentPath else {
                 isOnLocalNetwork = false
                 currentNetworkType = "Unknown"
                 return
             }
-            lastNetworkType = getCurrentInterfaceType(path: path)
+            detectedType = getCurrentInterfaceType(path: path)
+            lastNetworkType = detectedType
         }
         
         // Determine network status based on detected interface type, home network scope, AND bridge discovery
@@ -338,122 +332,10 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     func stopNetworkMonitoring() {
         networkMonitor?.cancel()
         networkMonitor = nil
-        stopHealthChecks()
         stopDiscoveryRetry()
     }
     
-    // MARK: - Health Checking
-    func startHealthChecks() {
-        // Start with default interval
-        consecutiveHealthCheckFailures = 0
-        healthCheckBackoffInterval = 10.0
-        scheduleNextHealthCheck()
-        print("✅ Health checks started")
-    }
-    
-    private func scheduleNextHealthCheck() {
-        healthCheckTimer?.invalidate()
-        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: healthCheckBackoffInterval, repeats: false) { [weak self] _ in
-            self?.verifyCurrentConnection()
-            // Schedule next check after this one completes
-            self?.scheduleNextHealthCheck()
-        }
-    }
-    
-    func stopHealthChecks() {
-        healthCheckTimer?.invalidate()
-        healthCheckTimer = nil
-        print("⏹️ Health checks stopped")
-    }
-    
-    private func verifyCurrentConnection() {
-        lastHealthCheckTime = Date()
-        
-        guard let urlString = rawAddress,
-              let url = URL(string: urlString.hasPrefix("http") ? urlString : "http://\(urlString)") else {
-            return
-        }
-        
-        guard let path = networkMonitor?.currentPath else { return }
-        let onWiFi = path.usesInterfaceType(.wifi)
-        
-        // Only do health checks when on home WiFi using local bridge
-        // All other scenarios are handled by network change detection:
-        // - Cellular -> only tunnel available, no point checking
-        // - WiFi with tunnel -> already determined not home network, no need to keep checking
-        // - WiFi goes down -> OS switches to cellular, triggers network change handler
-        
-        if !onWiFi {
-            // Not on WiFi - skip health checks
-            return
-        }
-        
-        if !isCurrentURLLocal {
-            // On WiFi but using tunnel (not home network) - skip health checks
-            return
-        }
-        
-        if !isOnLocalNetwork {
-            // Not on home network - skip health checks
-            return
-        }
-        
-        // Only reach here if: on home WiFi + using local bridge
-        // Check if local bridge is still responsive
-        
-        // Quick HEAD request to check if connection is alive
-        var request = URLRequest(url: url)
-        request.httpMethod = "HEAD"
-        request.timeoutInterval = 3.0
-        
-        URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                
-                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode < 400 {
-                    // Connection is good - reset failure tracking
-                    if self.consecutiveHealthCheckFailures > 0 {
-                        print("✅ Connection recovered after \(self.consecutiveHealthCheckFailures) failures")
-                    }
-                    self.consecutiveHealthCheckFailures = 0
-                    self.healthCheckBackoffInterval = 10.0
-                } else if error != nil {
-                    // Connection failed - increase backoff
-                    self.consecutiveHealthCheckFailures += 1
-                    
-                    // Exponential backoff: 10s, 20s, 40s, 60s (cap at 60s)
-                    self.healthCheckBackoffInterval = min(10.0 * pow(2.0, Double(min(self.consecutiveHealthCheckFailures - 1, 2))), 60.0)
-                    
-                    if self.consecutiveHealthCheckFailures <= 3 {
-                        print("⚠️ Health check failed for \(urlString) (failure #\(self.consecutiveHealthCheckFailures)), next check in \(Int(self.healthCheckBackoffInterval))s")
-                        // Try to switch on first few failures
-                        if self.consecutiveHealthCheckFailures <= 2 {
-                            self.attemptConnectionRecovery()
-                        }
-                    } else {
-                        // After 3 failures, stop spamming logs and recovery attempts
-                        print("⏸️ Multiple failures (\(self.consecutiveHealthCheckFailures)), backing off to \(Int(self.healthCheckBackoffInterval))s intervals")
-                    }
-                }
-            }
-        }.resume()
-    }
-    
-    private func attemptConnectionRecovery() {
-        guard let savedName = savedBridgeName,
-              let savedBridge = discoveredBridges.first(where: { $0.name == savedName }) else {
-            return
-        }
-        
-        // Try switching to the alternate connection method
-        if isOnLocalNetwork, let tunnel = savedBridge.tunnelURL {
-            print("Local connection failed, trying tunnel: \(tunnel)")
-            verifyAndSwitchURL(tunnel, fallback: nil, timeout: 3.0)
-        } else {
-            print("Tunnel connection failed, trying local: \(savedBridge.localAddress)")
-            verifyAndSwitchURL(savedBridge.localAddress, fallback: savedBridge.tunnelURL, timeout: 3.0)
-        }
-    }
+
     
     // MARK: - URL Selection Logic
     func checkNetworkAndUpdateURL() {
@@ -980,7 +862,11 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
                 }
                 
                 guard httpResponse.statusCode == 200 else {
-                    print("❌ Bridge returned status code: \(httpResponse.statusCode)")
+                    if httpResponse.statusCode == 404 {
+                        print("ℹ️ Bridge /api/tunnel endpoint not yet implemented (404)")
+                    } else {
+                        print("❌ Bridge returned status code: \(httpResponse.statusCode)")
+                    }
                     completion?(nil)
                     return
                 }

@@ -20,8 +20,6 @@ struct DVIHeatpumpApp: App {
         .onChange(of: scenePhase) { oldPhase, newPhase in
             if newPhase == .active {
                 print("=== App became ACTIVE ===")
-                // Restart health checks
-                bridgeConfig.startHealthChecks()
                 // Force complete restart of discovery when app becomes active
                 bridgeConfig.stopDiscovery()
                 // Small delay to ensure clean restart
@@ -34,8 +32,6 @@ struct DVIHeatpumpApp: App {
                 }
             } else if newPhase == .background {
                 print("=== App going to BACKGROUND ===")
-                // Stop health checks to save battery
-                bridgeConfig.stopHealthChecks()
                 // Stop discovery when going to background to save battery
                 bridgeConfig.stopDiscovery()
             }

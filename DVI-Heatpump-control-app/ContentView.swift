@@ -100,9 +100,9 @@ struct ContentView: View {
                                     ProgressView()
                                         .scaleEffect(0.8)
                                 } else {
-                                    Image(systemName: \"arrow.clockwise\")
+                                    Image(systemName: "arrow.clockwise")
                                 }
-                                Text(isRefreshingTunnel ? \"Updating Tunnel...\" : \"Update Tunnel URL\")
+                                Text(isRefreshingTunnel ? "Updating Tunnel..." : "Update Tunnel URL")
                             }
                         }
                         .buttonStyle(.bordered)
@@ -111,7 +111,7 @@ struct ContentView: View {
                         if let message = tunnelRefreshMessage {
                             Text(message)
                                 .font(.caption)
-                                .foregroundColor(message.contains(\"✓\") ? .green : .orange)
+                                .foregroundColor(message.contains("✓") ? .green : .orange)
                         }
                     }
                     .padding(.top, 8)
@@ -262,7 +262,7 @@ struct ContentView: View {
     }    
     private func refreshTunnelURL() {
         guard let currentAddress = bridgeConfig.rawAddress else {
-            tunnelRefreshMessage = \"⚠️ Not connected to bridge\"
+            tunnelRefreshMessage = "⚠️ Not connected to bridge"
             return
         }
         
@@ -273,15 +273,16 @@ struct ContentView: View {
             isRefreshingTunnel = false
             
             if let tunnelURL = tunnelURL {
-                tunnelRefreshMessage = \"✓ Tunnel URL updated\"
+                tunnelRefreshMessage = "✓ Tunnel URL updated"
                 // Clear message after 3 seconds
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                    if self.tunnelRefreshMessage == \"✓ Tunnel URL updated\" {
+                    if self.tunnelRefreshMessage == "✓ Tunnel URL updated" {
                         self.tunnelRefreshMessage = nil
                     }
                 }
             } else {
-                tunnelRefreshMessage = \"⚠️ Could not fetch tunnel URL\"
+                tunnelRefreshMessage = "⚠️ Could not fetch tunnel URL"
             }
         }
-    }}
+    }
+}
