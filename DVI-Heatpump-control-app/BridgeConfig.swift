@@ -262,7 +262,7 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
                 
                 // Smart discovery: only if WiFi + matching home scope
                 if path.usesInterfaceType(.wifi) && self.shouldRunDiscovery() {
-                    print("📡 Starting time-limited discovery (30s window)")
+                    print("📡 Starting time-limited discovery (10s window)")
                     self.startSmartDiscovery()
                 } else {
                     print("⏭️ Skipping discovery - using tunnel (cellular or different network scope)")
@@ -667,20 +667,20 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
             return false
         }
         
-        // Check if we're within 30 seconds of network connection
+        // Check if we're within 10 seconds of network connection
         if let connectionTime = networkConnectionTime {
             let elapsed = Date().timeIntervalSince(connectionTime)
-            if elapsed > 30.0 {
-                print("📡 Discovery window expired (\(Int(elapsed))s > 30s) - skipping")
+            if elapsed > 10.0 {
+                print("📡 Discovery window expired (\(Int(elapsed))s > 10s) - skipping")
                 return false
             }
-            print("📡 Within discovery window (\(Int(elapsed))s / 30s)")
+            print("📡 Within discovery window (\(Int(elapsed))s / 10s)")
         }
         
         return true
     }
     
-    /// Start smart discovery with automatic 30-second timeout
+    /// Start smart discovery with automatic 10-second timeout
     private func startSmartDiscovery() {
         print("Starting smart bridge discovery...")
         
@@ -707,10 +707,10 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         browser?.delegate = self
         browser?.searchForServices(ofType: "_dvi-bridge._tcp.", inDomain: "local.")
         
-        // Set up 30-second hard stop for discovery
+        // Set up 10-second hard stop for discovery
         discoveryStopTimer?.invalidate()
-        discoveryStopTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: false) { [weak self] _ in
-            print("⏱️ 30-second discovery window expired - stopping discovery")
+        discoveryStopTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { [weak self] _ in
+            print("⏱️ 10-second discovery window expired - stopping discovery")
             self?.stopDiscovery()
             // If no bridge found, ensure we're using tunnel
             if self?.discoveredBridges.isEmpty == true {
@@ -741,7 +741,7 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         // Don't clear discovered services map - keep them cached
         stopDiscoveryRetry()
         
-        // Stop the 30-second discovery window timer
+        // Stop the 10-second discovery window timer
         discoveryStopTimer?.invalidate()
         discoveryStopTimer = nil
     }
@@ -758,10 +758,10 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         discoveryRetryTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             
-            // Check if still within 30-second discovery window
+            // Check if still within 10-second discovery window
             if let connectionTime = self.networkConnectionTime {
                 let elapsed = Date().timeIntervalSince(connectionTime)
-                if elapsed > 30.0 {
+                if elapsed > 10.0 {
                     print("⏱️ Discovery window expired during retry - stopping")
                     self.stopDiscoveryRetry()
                     self.stopDiscovery()
