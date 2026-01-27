@@ -17,6 +17,8 @@ struct ContentView: View {
     @State private var showQRScanner = false
     @State private var scannedCode: String? = nil
     @State private var hasAutoConnected = false
+    @State private var isRefreshingTunnel = false
+    @State private var tunnelRefreshMessage: String?
 
     var body: some View {
         NavigationView {
@@ -86,8 +88,34 @@ struct ContentView: View {
                     }
                     .buttonStyle(.borderedProminent)
                 }
-                .padding(.top, 10)
-
+                .padding(.top, 10)                
+                // Tunnel refresh button (only show when on local network)
+                if bridgeConfig.isOnLocalNetwork && bridgeConfig.rawAddress != nil {
+                    VStack(spacing: 8) {
+                        Button(action: {
+                            refreshTunnelURL()
+                        }) {
+                            HStack {
+                                if isRefreshingTunnel {
+                                    ProgressView()
+                                        .scaleEffect(0.8)
+                                } else {
+                                    Image(systemName: \"arrow.clockwise\")
+                                }
+                                Text(isRefreshingTunnel ? \"Updating Tunnel...\" : \"Update Tunnel URL\")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(isRefreshingTunnel)
+                        
+                        if let message = tunnelRefreshMessage {
+                            Text(message)
+                                .font(.caption)
+                                .foregroundColor(message.contains(\"✓\") ? .green : .orange)
+                        }
+                    }
+                    .padding(.top, 8)
+                }
                 if let error = errorMessage {
                     Text(error)
                         .foregroundColor(.red)
@@ -231,5 +259,29 @@ struct ContentView: View {
         }
 
         showWebView = true
-    }
-}
+    }    
+    private func refreshTunnelURL() {
+        guard let currentAddress = bridgeConfig.rawAddress else {
+            tunnelRefreshMessage = \"⚠️ Not connected to bridge\"
+            return
+        }
+        
+        isRefreshingTunnel = true
+        tunnelRefreshMessage = nil
+        
+        bridgeConfig.fetchTunnelURLFromBridge(bridgeURL: currentAddress) { [self] tunnelURL in
+            isRefreshingTunnel = false
+            
+            if let tunnelURL = tunnelURL {
+                tunnelRefreshMessage = \"✓ Tunnel URL updated\"
+                // Clear message after 3 seconds
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                    if self.tunnelRefreshMessage == \"✓ Tunnel URL updated\" {
+                        self.tunnelRefreshMessage = nil
+                    }
+                }
+            } else {
+                tunnelRefreshMessage = \"⚠️ Could not fetch tunnel URL\"
+            }
+        }
+    }}
