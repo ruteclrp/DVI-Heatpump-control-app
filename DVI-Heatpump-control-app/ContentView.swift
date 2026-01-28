@@ -14,16 +14,8 @@ struct ContentView: View {
     @EnvironmentObject var bridgeConfig: BridgeConfig
 
     @State private var manualAddress = ""
-    @State private var username: String = "" {
-        didSet {
-            saveCredentials()
-        }
-    }
-    @State private var password: String = "" {
-        didSet {
-            saveCredentials()
-        }
-    }
+    @State private var username: String = ""
+    @State private var password: String = ""
     @State private var showWebView = false
     @State private var errorMessage: String?
     @State private var reloadTrigger = false
@@ -112,6 +104,7 @@ struct ContentView: View {
                     .buttonStyle(.bordered)
                     
                     Button("Connect") {
+                        saveCredentials()
                         attemptConnection()
                     }
                     .buttonStyle(.borderedProminent)
@@ -164,27 +157,6 @@ struct ContentView: View {
                 loadCredentials()
                 bridgeConfig.startDiscovery()
             }
-                // MARK: - Keychain Integration
-                private func saveCredentials() {
-                    guard !username.isEmpty, !password.isEmpty else { return }
-                    if let userData = username.data(using: .utf8) {
-                        _ = KeychainHelper.save(service: keychainService, account: "username", data: userData)
-                    }
-                    if let passData = password.data(using: .utf8) {
-                        _ = KeychainHelper.save(service: keychainService, account: "password", data: passData)
-                    }
-                }
-
-                private func loadCredentials() {
-                    if let userData = KeychainHelper.load(service: keychainService, account: "username"),
-                       let user = String(data: userData, encoding: .utf8) {
-                        username = user
-                    }
-                    if let passData = KeychainHelper.load(service: keychainService, account: "password"),
-                       let pass = String(data: passData, encoding: .utf8) {
-                        password = pass
-                    }
-                }
             .onDisappear {
                 bridgeConfig.stopDiscovery()
             }
@@ -293,6 +265,28 @@ struct ContentView: View {
             }
         }
     }
+
+                // MARK: - Keychain Integration
+                private func saveCredentials() {
+                    guard !username.isEmpty, !password.isEmpty else { return }
+                    if let userData = username.data(using: .utf8) {
+                        _ = KeychainHelper.save(service: keychainService, account: "username", data: userData)
+                    }
+                    if let passData = password.data(using: .utf8) {
+                        _ = KeychainHelper.save(service: keychainService, account: "password", data: passData)
+                    }
+                }
+
+                private func loadCredentials() {
+                    if let userData = KeychainHelper.load(service: keychainService, account: "username"),
+                       let user = String(data: userData, encoding: .utf8) {
+                        username = user
+                    }
+                    if let passData = KeychainHelper.load(service: keychainService, account: "password"),
+                       let pass = String(data: passData, encoding: .utf8) {
+                        password = pass
+                    }
+                }
 
     private func attemptConnection() {
         guard !manualAddress.isEmpty else {
