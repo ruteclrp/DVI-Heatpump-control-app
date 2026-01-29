@@ -12,8 +12,6 @@ import WebKit
 struct SidecarWebView: UIViewRepresentable {
     let url: URL
     @Binding var reloadTrigger: Bool
-    let username: String?
-    let password: String?
 
     func makeUIView(context: Context) -> WKWebView {
         let webView = WKWebView()
@@ -25,14 +23,7 @@ struct SidecarWebView: UIViewRepresentable {
     }
 
     private func makeRequest() -> URLRequest {
-        var request = URLRequest(url: url)
-        if let user = username, let pass = password, !user.isEmpty, !pass.isEmpty {
-            let loginString = String(format: "%@:%@", user, pass)
-            if let loginData = loginString.data(using: .utf8) {
-                let base64LoginString = loginData.base64EncodedString()
-                request.setValue("Basic \(base64LoginString)", forHTTPHeaderField: "Authorization")
-            }
-        }
+        let request = URLRequest(url: url)
         return request
     }
 

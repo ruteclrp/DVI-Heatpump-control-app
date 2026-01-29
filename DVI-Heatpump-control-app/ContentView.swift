@@ -14,8 +14,6 @@ struct ContentView: View {
     @EnvironmentObject var bridgeConfig: BridgeConfig
 
     @State private var manualAddress = ""
-    @State private var username: String = ""
-    @State private var password: String = ""
     @State private var showWebView = false
     @State private var errorMessage: String?
     @State private var reloadTrigger = false
@@ -80,20 +78,7 @@ struct ContentView: View {
                 }
                 .padding(.horizontal)
 
-                // Username/Password fields (only show when NOT on local WiFi)
-                if !bridgeConfig.isOnLocalNetwork {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Authorization (Cloudflare only)")
-                            .font(.headline)
-                        TextField("Username", text: $username)
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
-                            .autocapitalization(.none)
-                            .disableAutocorrection(true)
-                        SecureField("Password", text: $password)
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
-                    }
-                    .padding(.horizontal)
-                }
+                // ...existing code...
 
                 HStack(spacing: 16) {
                     Button(action: {
@@ -104,7 +89,6 @@ struct ContentView: View {
                     .buttonStyle(.bordered)
                     
                     Button("Connect") {
-                        saveCredentials()
                         attemptConnection()
                     }
                     .buttonStyle(.borderedProminent)
@@ -154,7 +138,6 @@ struct ContentView: View {
                 } else {
                     print("📝 ContentView: onAppear - rawAddress is nil")
                 }
-                loadCredentials()
                 bridgeConfig.startDiscovery()
             }
             .onDisappear {
@@ -232,7 +215,7 @@ struct ContentView: View {
                             .background(bridgeConfig.isOnLocalNetwork ? Color.green.opacity(0.1) : Color.blue.opacity(0.1))
                             .border(bridgeConfig.isOnLocalNetwork ? Color.green.opacity(0.3) : Color.blue.opacity(0.3), width: 0.5)
                             
-                            SidecarWebView(url: url, reloadTrigger: $reloadTrigger, username: bridgeConfig.isOnLocalNetwork ? nil : username, password: bridgeConfig.isOnLocalNetwork ? nil : password)
+                            SidecarWebView(url: url, reloadTrigger: $reloadTrigger)
                         }
                         .navigationTitle("Sidecar")
                         .navigationBarTitleDisplayMode(.inline)
@@ -266,27 +249,7 @@ struct ContentView: View {
         }
     }
 
-                // MARK: - Keychain Integration
-                private func saveCredentials() {
-                    guard !username.isEmpty, !password.isEmpty else { return }
-                    if let userData = username.data(using: .utf8) {
-                        _ = KeychainHelper.save(service: keychainService, account: "username", data: userData)
-                    }
-                    if let passData = password.data(using: .utf8) {
-                        _ = KeychainHelper.save(service: keychainService, account: "password", data: passData)
-                    }
-                }
-
-                private func loadCredentials() {
-                    if let userData = KeychainHelper.load(service: keychainService, account: "username"),
-                       let user = String(data: userData, encoding: .utf8) {
-                        username = user
-                    }
-                    if let passData = KeychainHelper.load(service: keychainService, account: "password"),
-                       let pass = String(data: passData, encoding: .utf8) {
-                        password = pass
-                    }
-                }
+                // ...existing code...
 
     private func attemptConnection() {
         guard !manualAddress.isEmpty else {
