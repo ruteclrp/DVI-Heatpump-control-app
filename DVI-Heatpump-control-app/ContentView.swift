@@ -7,6 +7,58 @@
 
 import SwiftUI
 
+import Foundation
+import Security
+
+func saveTokenToKeychain(token: String, service: String = "RPiToken") -> Bool {
+    let data = token.data(using: .utf8)!
+    let query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: service,
+        kSecValueData as String: data
+    ]
+    SecItemDelete(query as CFDictionary) // Remove any existing item
+    let status = SecItemAdd(query as CFDictionary, nil)
+    return status == errSecSuccess
+}
+
+func loadTokenFromKeychain(service: String = "RPiToken") -> String? {
+    let query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: service,
+        kSecReturnData as String: true,
+        kSecMatchLimit as String: kSecMatchLimitOne
+    ]
+    var dataTypeRef: AnyObject?
+    let status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+    if status == errSecSuccess, let data = dataTypeRef as? Data {
+        return String(data: data, encoding: .utf8)
+    }
+    return nil
+}
+
+// Fetch token from RPi bridge
+func fetchTokenFromRPi(rpiIP: String, completion: @escaping (String?) -> Void) {
+    // Sanitize address to avoid double http://
+    var address = rpiIP.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !address.hasPrefix("http://") && !address.hasPrefix("https://") {
+        address = "http://" + address
+    }
+    guard let url = URL(string: "\(address)/pair") else {
+        completion(nil)
+        return
+    }
+    let task = URLSession.shared.dataTask(with: url) { data, response, error in
+        guard let data = data, error == nil else {
+            completion(nil)
+            return
+        }
+        let token = String(data: data, encoding: .utf8)
+        completion(token)
+    }
+    task.resume()
+}
+
 
 struct ContentView: View {
     @EnvironmentObject var bridgeConfig: BridgeConfig
@@ -20,14 +72,17 @@ struct ContentView: View {
     @State private var hasAutoConnected = false
     @State private var isRefreshingTunnel = false
     @State private var tunnelRefreshMessage: String?
+    @State private var tokenStatus: String? = nil
 
     var body: some View {
         NavigationView {
             VStack(spacing: 24) {
-
-                Text("Connect to your DVI Heatpump")
-                    .font(.title2)
-                    .padding(.top, 40)
+                // Only show title if not in settings sheet
+                if !showWebView {
+                    Text("Connect to your DVI Heatpump")
+                        .font(.title2)
+                        .padding(.top, 40)
+                }
 
                 // Auto-discovered bridges
                 if !bridgeConfig.discoveredBridges.isEmpty {
@@ -35,12 +90,12 @@ struct ContentView: View {
                         Text("Found on Network")
                             .font(.headline)
                             .padding(.horizontal)
-                        
                         ForEach(bridgeConfig.discoveredBridges) { bridge in
                             Button(action: {
                                 bridgeConfig.saveBridge(bridge)
                                 manualAddress = bridgeConfig.isOnLocalNetwork ? bridge.localAddress : (bridge.tunnelURL ?? bridge.localAddress)
                                 attemptConnection()
+                                hideKeyboard()
                             }) {
                                 HStack {
                                     Image(systemName: "antenna.radiowaves.left.and.right")
@@ -67,7 +122,6 @@ struct ContentView: View {
                 VStack(alignment: .leading) {
                     Text("Manual Entry")
                         .font(.headline)
-
                     TextField("IP, hostname, or tunnel URL", text: $manualAddress)
                         .textFieldStyle(RoundedBorderTextFieldStyle())
                         .keyboardType(.URL)
@@ -76,27 +130,28 @@ struct ContentView: View {
                 }
                 .padding(.horizontal)
 
-                // ...existing code...
-
                 HStack(spacing: 16) {
                     Button(action: {
                         showQRScanner = true
+                        hideKeyboard()
                     }) {
                         Label("Scan QR", systemImage: "qrcode.viewfinder")
                     }
                     .buttonStyle(.bordered)
-                    
                     Button("Connect") {
                         attemptConnection()
+                        hideKeyboard()
                     }
                     .buttonStyle(.borderedProminent)
                 }
-                .padding(.top, 10)                
+                .padding(.top, 10)
+
                 // Tunnel refresh button (only show when on local network)
                 if bridgeConfig.isOnLocalNetwork && bridgeConfig.rawAddress != nil {
                     VStack(spacing: 8) {
                         Button(action: {
                             refreshTunnelURL()
+                            hideKeyboard()
                         }) {
                             HStack {
                                 if isRefreshingTunnel {
@@ -110,7 +165,6 @@ struct ContentView: View {
                         }
                         .buttonStyle(.bordered)
                         .disabled(isRefreshingTunnel)
-                        
                         if let message = tunnelRefreshMessage {
                             Text(message)
                                 .font(.caption)
@@ -118,23 +172,52 @@ struct ContentView: View {
                         }
                     }
                     .padding(.top, 8)
+
+                    // Fetch and save token from RPi (visible only on local network)
+                    Button(action: {
+                        let rpiIP = bridgeConfig.rawAddress ?? ""
+                        fetchTokenFromRPi(rpiIP: rpiIP) { token in
+                            DispatchQueue.main.async {
+                                if let token = token {
+                                    let saved = saveTokenToKeychain(token: token)
+                                    tokenStatus = saved ? "Token saved!" : "Failed to save token"
+                                } else {
+                                    tokenStatus = "Failed to fetch token"
+                                }
+                            }
+                        }
+                        hideKeyboard()
+                    }) {
+                        Label("Fetch & Save RPi Token", systemImage: "key.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    if let status = tokenStatus {
+                        Text(status)
+                            .font(.caption)
+                            .foregroundColor(status.contains("saved") ? .green : .red)
+                    }
+                    if let token = loadTokenFromKeychain() {
+                        Text("Saved Token: \(token)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
                 if let error = errorMessage {
                     Text(error)
                         .foregroundColor(.red)
                         .padding(.top, 10)
                 }
-
                 Spacer()
             }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                hideKeyboard()
+            }
             .navigationTitle("DVI Heatpump")
+            // ...existing code...
             .onAppear {
-                // Sync manual address with current rawAddress on appear
                 if let currentAddress = bridgeConfig.rawAddress {
-                    print("📝 ContentView: onAppear - syncing manualAddress to: \(currentAddress)")
                     manualAddress = currentAddress
-                } else {
-                    print("📝 ContentView: onAppear - rawAddress is nil")
                 }
                 bridgeConfig.startDiscovery()
             }
@@ -142,7 +225,6 @@ struct ContentView: View {
                 bridgeConfig.stopDiscovery()
             }
             .onChange(of: bridgeConfig.discoveredBridges) {
-                // Auto-connect if we find the saved bridge and haven't already connected
                 if !hasAutoConnected && bridgeConfig.shouldAutoConnect() {
                     hasAutoConnected = true
                     if let activeURL = bridgeConfig.activeURL {
@@ -152,26 +234,15 @@ struct ContentView: View {
                 }
             }
             .onChange(of: bridgeConfig.rawAddress) {
-                // Sync the manual address field with the active URL whenever it changes
-                print("📝 ContentView: onChange(rawAddress) triggered")
                 if let activeAddress = bridgeConfig.rawAddress {
-                    print("📝 ContentView: rawAddress changed to \(activeAddress)")
-                    print("📝 ContentView: manualAddress WAS: \(manualAddress)")
                     manualAddress = activeAddress
-                    print("📝 ContentView: manualAddress NOW: \(manualAddress)")
-                    // If web view is showing, trigger reload
                     if showWebView {
-                        print("📝 ContentView: Web view is showing, triggering reload")
                         reloadTrigger = true
                     }
-                } else {
-                    print("📝 ContentView: rawAddress is nil")
                 }
             }
             .onChange(of: bridgeConfig.activeURL) {
-                // When activeURL changes (network switch), force reload if webview is showing
                 if showWebView && bridgeConfig.activeURL != nil {
-                    print("Active URL changed, triggering reload")
                     reloadTrigger = true
                 }
             }
@@ -191,7 +262,6 @@ struct ContentView: View {
                 NavigationView {
                     if let url = bridgeConfig.normalizedURL {
                         VStack(spacing: 0) {
-                            // Connection status indicator
                             HStack {
                                 if bridgeConfig.isVerifyingConnection {
                                     ProgressView()
@@ -212,26 +282,19 @@ struct ContentView: View {
                             .padding()
                             .background(bridgeConfig.isOnLocalNetwork ? Color.green.opacity(0.1) : Color.blue.opacity(0.1))
                             .border(bridgeConfig.isOnLocalNetwork ? Color.green.opacity(0.3) : Color.blue.opacity(0.3), width: 0.5)
-                            
                             SidecarWebView(url: url, reloadTrigger: $reloadTrigger)
                         }
                         .navigationTitle("Sidecar")
                         .navigationBarTitleDisplayMode(.inline)
                         .toolbar {
-
-                            // Change IP / Close
                             ToolbarItem(placement: .navigationBarLeading) {
                                 Button("Change Address") {
                                     showWebView = false
-                                    // Sync address when returning to ContentView
                                     if let currentAddress = bridgeConfig.rawAddress {
                                         manualAddress = currentAddress
-                                        print("📝 WebView closing - synced manualAddress to: \(currentAddress)")
                                     }
                                 }
                             }
-
-                            // Reload button
                             ToolbarItem(placement: .navigationBarTrailing) {
                                 Button("Reload") {
                                     reloadTrigger = true
@@ -246,9 +309,7 @@ struct ContentView: View {
             }
         }
     }
-
-                // ...existing code...
-
+    
     private func attemptConnection() {
         guard !manualAddress.isEmpty else {
             errorMessage = "Please enter an IP or hostname."
@@ -291,3 +352,11 @@ struct ContentView: View {
         }
     }
 }
+    // Helper to dismiss keyboard
+    #if canImport(UIKit)
+    extension View {
+        func hideKeyboard() {
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        }
+    }
+    #endif
