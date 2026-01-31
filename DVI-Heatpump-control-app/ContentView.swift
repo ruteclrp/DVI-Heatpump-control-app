@@ -6,9 +6,7 @@
 //
 
 import SwiftUI
-import Security
 
-let keychainService = "DVIHeatpumpAppAuth"
 
 struct ContentView: View {
     @EnvironmentObject var bridgeConfig: BridgeConfig
