@@ -45,15 +45,31 @@ func fetchTokenFromRPi(rpiIP: String, completion: @escaping (String?) -> Void) {
         address = "http://" + address
     }
     guard let url = URL(string: "\(address)/pair") else {
+        print("[DEBUG] Invalid URL: \(address)/pair")
         completion(nil)
         return
     }
-    let task = URLSession.shared.dataTask(with: url) { data, response, error in
-        guard let data = data, error == nil else {
+    print("[DEBUG] Fetching token from URL: \(url)")
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = Data()
+    let task = URLSession.shared.dataTask(with: request) { data, response, error in
+        if let error = error {
+            print("[DEBUG] Network error: \(error.localizedDescription)")
+            completion(nil)
+            return
+        }
+        if let httpResponse = response as? HTTPURLResponse {
+            print("[DEBUG] HTTP status code: \(httpResponse.statusCode)")
+        }
+        guard let data = data else {
+            print("[DEBUG] No data received from server.")
             completion(nil)
             return
         }
         let token = String(data: data, encoding: .utf8)
+        print("[DEBUG] Received token: \(token ?? "nil")")
         completion(token)
     }
     task.resume()
