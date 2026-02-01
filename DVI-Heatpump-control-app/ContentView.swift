@@ -68,9 +68,20 @@ func fetchTokenFromRPi(rpiIP: String, completion: @escaping (String?) -> Void) {
             completion(nil)
             return
         }
-        let token = String(data: data, encoding: .utf8)
-        print("[DEBUG] Received token: \(token ?? "nil")")
-        completion(token)
+            // Try to decode JSON response
+            do {
+                if let json = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+                   let token = json["token"] as? String {
+                    print("[DEBUG] Received token: \(token)")
+                    completion(token)
+                } else {
+                    print("[DEBUG] JSON does not contain 'token' key: \(String(data: data, encoding: .utf8) ?? "nil")")
+                    completion(nil)
+                }
+            } catch {
+                print("[DEBUG] Failed to parse JSON: \(error.localizedDescription)")
+                completion(nil)
+            }
     }
     task.resume()
 }
