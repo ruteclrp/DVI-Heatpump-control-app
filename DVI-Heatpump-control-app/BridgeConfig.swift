@@ -48,6 +48,17 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         let name: String
         let localAddress: String
         let tunnelURL: String?
+        let hostname: String?  // For pump-XXXXXX-owner hostnames
+        
+        /// Get the preferred local address - hostname if available (pump-XXXXXX-owner), otherwise IP address
+        var preferredLocalAddress: String {
+            if let hostname = hostname, !hostname.isEmpty {
+                // Use hostname for local network (e.g., pump-143970-owner)
+                return "http://\(hostname):5000"
+            }
+            // Fallback to IP address
+            return localAddress
+        }
     }
 
     override init() {
@@ -68,6 +79,11 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         if raw.hasSuffix(".local") {
             return URL(string: "http://\(raw):5000")
         }
+        
+        // Check for pump-XXXXXX-owner hostname pattern (local network)
+        if raw.range(of: #"^pump-\d+-owner$"#, options: .regularExpression) != nil {
+            return URL(string: "http://\(raw):5000")
+        }
 
         if raw.range(of: #"^\d{1,3}(\.\d{1,3}){3}$"#,
                      options: .regularExpression) != nil {
@@ -77,7 +93,7 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         return URL(string: "https://\(raw)")
     }
     
-    // Check if the current URL is a local address (IP or .local hostname)
+    // Check if the current URL is a local address (IP, .local hostname, or pump-XXXXXX-owner)
     private var isCurrentURLLocal: Bool {
         guard let raw = rawAddress?.trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
         
@@ -88,6 +104,11 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         
         // Check if it's a .local address
         if raw.contains(".local") {
+            return true
+        }
+        
+        // Check for pump-XXXXXX-owner hostname (local network)
+        if raw.range(of: #"pump-\d+-owner"#, options: .regularExpression) != nil {
             return true
         }
         
@@ -396,7 +417,8 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
             print("🔄 Found cached bridge: \(savedBridge.name)")
             
             if onWiFi {
-                let newURL = savedBridge.localAddress
+                // Use hostname if available, otherwise fall back to IP
+                let newURL = savedBridge.preferredLocalAddress
                 print("→ Forcing switch to LOCAL: \(newURL)")
                 verifyAndSwitchURL(newURL, fallback: savedBridge.tunnelURL, timeout: 2.0)
             } else if let tunnelURL = savedBridge.tunnelURL {
@@ -437,9 +459,9 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         // Find the saved bridge if we have one
         if let savedName = savedBridgeName,
            let savedBridge = discoveredBridges.first(where: { $0.name == savedName || $0.tunnelURL == savedTunnelURL }) {
-            // If on WiFi, prefer local URL (verify it first)
+            // If on WiFi, prefer local URL (hostname if available, otherwise IP)
             if onWiFi {
-                let newURL = savedBridge.localAddress
+                let newURL = savedBridge.preferredLocalAddress
                 if rawAddress != newURL || forceSwitch {
                     print("Network is WiFi, switching to local URL: \(newURL)")
                     verifyAndSwitchURL(newURL, fallback: savedBridge.tunnelURL, timeout: 3.0)
@@ -466,9 +488,9 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         // Find the saved bridge if we have one
         if let savedName = savedBridgeName,
            let savedBridge = discoveredBridges.first(where: { $0.name == savedName || $0.tunnelURL == savedTunnelURL }) {
-            // If on WiFi, use local URL
+            // If on WiFi, use preferred local URL (hostname if available)
             if onWiFi {
-                let newURL = savedBridge.localAddress
+                let newURL = savedBridge.preferredLocalAddress
                 if rawAddress != newURL {
                     activeURL = URL(string: newURL)
                     rawAddress = newURL
@@ -746,13 +768,18 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
             }
         }
         
-        // Read TXT record for tunnel URL
+        // Read TXT record for tunnel URL and hostname
         var tunnelURL: String? = nil
+        var hostname: String? = nil
         if let txtData = sender.txtRecordData() {
             let txtDict = NetService.dictionary(fromTXTRecord: txtData)
             if let tunnelData = txtDict["tunnel_url"], let tunnel = String(data: tunnelData, encoding: .utf8) {
                 tunnelURL = tunnel
                 print("Found tunnel URL in TXT record: \(tunnel)")
+            }
+            if let hostnameData = txtDict["hostname"], let host = String(data: hostnameData, encoding: .utf8) {
+                hostname = host
+                print("Found hostname in TXT record: \(host)")
             }
         }
         
@@ -763,26 +790,26 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         let bridge = DiscoveredBridge(
             name: sender.name,
             localAddress: localAddr,
-            tunnelURL: tunnelURL
+            tunnelURL: tunnelURL,
+            hostname: hostname
         )
         
         discoveredServicesMap[sender.name] = bridge
         resolvingServices.remove(sender)
         updateDiscoveredBridges()
         
-        // Also fetch tunnel URL via HTTP to get the latest (in case TXT record is outdated)
+        // Also fetch tunnel URL and hostname via HTTP to get the latest (in case TXT record is outdated)
         // This is especially useful when trycloudflare tunnel is recreated
-        fetchTunnelURLFromBridge(bridgeURL: localAddr) { [weak self] fetchedURL in
-            if let fetchedURL = fetchedURL {
-                // Update bridge entry with fetched tunnel URL
-                let updatedBridge = DiscoveredBridge(
-                    name: sender.name,
-                    localAddress: localAddr,
-                    tunnelURL: fetchedURL
-                )
-                self?.discoveredServicesMap[sender.name] = updatedBridge
-                self?.updateDiscoveredBridges()
-            }
+        fetchTunnelInfoFromBridge(bridgeURL: localAddr) { [weak self] fetchedURL, fetchedHostname in
+            // Update bridge entry with fetched info
+            let updatedBridge = DiscoveredBridge(
+                name: sender.name,
+                localAddress: localAddr,
+                tunnelURL: fetchedURL ?? tunnelURL,
+                hostname: fetchedHostname ?? hostname
+            )
+            self?.discoveredServicesMap[sender.name] = updatedBridge
+            self?.updateDiscoveredBridges()
         }
     }
     
@@ -826,13 +853,13 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     
     // MARK: - Tunnel URL Discovery
     
-    /// Fetch the current tunnel URL from the bridge when connected locally
+    /// Fetch the current tunnel info (URL and hostname) from the bridge when connected locally
     /// This is useful when the tunnel is recreated and the app needs to get the new URL
-    func fetchTunnelURLFromBridge(bridgeURL: String, completion: ((String?) -> Void)? = nil) {
+    func fetchTunnelInfoFromBridge(bridgeURL: String, completion: ((String?, String?) -> Void)? = nil) {
         // Construct endpoint URL (assuming bridge exposes tunnel info at /api/tunnel)
         guard var baseURL = URL(string: bridgeURL.hasPrefix("http") ? bridgeURL : "http://\(bridgeURL)") else {
             print("⚠️ Invalid bridge URL: \(bridgeURL)")
-            completion?(nil)
+            completion?(nil, nil)
             return
         }
         
@@ -840,7 +867,7 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         baseURL.appendPathComponent("api")
         baseURL.appendPathComponent("tunnel")
         
-        print("🔍 Fetching tunnel URL from bridge at: \(baseURL.absoluteString)")
+        print("🔍 Fetching tunnel info from bridge at: \(baseURL.absoluteString)")
         
         var request = URLRequest(url: baseURL)
         request.httpMethod = "GET"
@@ -850,14 +877,14 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 if let error = error {
-                    print("❌ Failed to fetch tunnel URL: \(error.localizedDescription)")
-                    completion?(nil)
+                    print("❌ Failed to fetch tunnel info: \(error.localizedDescription)")
+                    completion?(nil, nil)
                     return
                 }
                 
                 guard let httpResponse = response as? HTTPURLResponse else {
                     print("❌ Invalid response from bridge")
-                    completion?(nil)
+                    completion?(nil, nil)
                     return
                 }
                 
@@ -867,24 +894,31 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
                     } else {
                         print("❌ Bridge returned status code: \(httpResponse.statusCode)")
                     }
-                    completion?(nil)
+                    completion?(nil, nil)
                     return
                 }
                 
                 guard let data = data else {
                     print("❌ No data received from bridge")
-                    completion?(nil)
+                    completion?(nil, nil)
                     return
                 }
                 
                 do {
                     // Try to parse JSON response
-                    if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                       let tunnelURL = json["tunnel_url"] as? String {
-                        print("✅ Fetched tunnel URL from bridge: \(tunnelURL)")
+                    if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        let tunnelURL = json["tunnel_url"] as? String
+                        let hostname = json["hostname"] as? String
+                        
+                        if let tunnelURL = tunnelURL {
+                            print("✅ Fetched tunnel URL from bridge: \(tunnelURL)")
+                        }
+                        if let hostname = hostname {
+                            print("✅ Fetched hostname from bridge: \(hostname)")
+                        }
                         
                         // Update saved tunnel URL if it changed
-                        if self?.savedTunnelURL != tunnelURL {
+                        if let tunnelURL = tunnelURL, self?.savedTunnelURL != tunnelURL {
                             print("🔄 Tunnel URL changed, updating: \(self?.savedTunnelURL ?? "nil") → \(tunnelURL)")
                             self?.savedTunnelURL = tunnelURL
                             
@@ -894,25 +928,34 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
                                 let updatedBridge = DiscoveredBridge(
                                     name: bridge.name,
                                     localAddress: bridge.localAddress,
-                                    tunnelURL: tunnelURL
+                                    tunnelURL: tunnelURL,
+                                    hostname: hostname ?? bridge.hostname
                                 )
                                 self?.discoveredServicesMap[savedName] = updatedBridge
                                 self?.updateDiscoveredBridges()
                             }
                         }
                         
-                        completion?(tunnelURL)
+                        completion?(tunnelURL, hostname)
                         return
                     }
                     
                     print("❌ Unexpected JSON format from bridge")
-                    completion?(nil)
+                    completion?(nil, nil)
                 } catch {
                     print("❌ Failed to parse JSON response: \(error.localizedDescription)")
-                    completion?(nil)
+                    completion?(nil, nil)
                 }
             }
         }.resume()
+    }
+    
+    /// Fetch the current tunnel URL from the bridge when connected locally (legacy method)
+    /// This is useful when the tunnel is recreated and the app needs to get the new URL
+    func fetchTunnelURLFromBridge(bridgeURL: String, completion: ((String?) -> Void)? = nil) {
+        fetchTunnelInfoFromBridge(bridgeURL: bridgeURL) { tunnelURL, _ in
+            completion?(tunnelURL)
+        }
     }
     
     /// Refresh tunnel URL from the bridge if currently connected locally

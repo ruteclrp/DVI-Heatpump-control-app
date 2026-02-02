@@ -120,7 +120,7 @@ struct ContentView: View {
                         ForEach(bridgeConfig.discoveredBridges) { bridge in
                             Button(action: {
                                 bridgeConfig.saveBridge(bridge)
-                                manualAddress = bridgeConfig.isOnLocalNetwork ? bridge.localAddress : (bridge.tunnelURL ?? bridge.localAddress)
+                                manualAddress = bridgeConfig.isOnLocalNetwork ? bridge.preferredLocalAddress : (bridge.tunnelURL ?? bridge.preferredLocalAddress)
                                 attemptConnection()
                                 hideKeyboard()
                             }) {
@@ -129,9 +129,22 @@ struct ContentView: View {
                                     VStack(alignment: .leading) {
                                         Text(bridge.name)
                                             .font(.subheadline)
-                                        Text(bridgeConfig.isOnLocalNetwork ? "Local: \(bridge.localAddress)" : "Remote: \(bridge.tunnelURL ?? "N/A")")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
+                                        if bridgeConfig.isOnLocalNetwork {
+                                            // Show hostname if available, otherwise IP
+                                            if let hostname = bridge.hostname, !hostname.isEmpty {
+                                                Text("Local: \(hostname)")
+                                                    .font(.caption)
+                                                    .foregroundColor(.secondary)
+                                            } else {
+                                                Text("Local: \(bridge.localAddress)")
+                                                    .font(.caption)
+                                                    .foregroundColor(.secondary)
+                                            }
+                                        } else {
+                                            Text("Remote: \(bridge.tunnelURL ?? "N/A")")
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                        }
                                     }
                                     Spacer()
                                     Image(systemName: "chevron.right")
