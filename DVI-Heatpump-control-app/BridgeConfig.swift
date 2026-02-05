@@ -25,6 +25,7 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     private var lastNetworkType: NWInterface.InterfaceType?
     private var networkConnectionTime: Date?
     private var discoveryStopTimer: Timer?
+    private var discoveryInProgress = false
     private var cachedDeviceIP: String?
     private var cachedNetworkScope: String?
     private var lastNetworkInterfaceCheck: Date?
@@ -99,29 +100,26 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     
     // Check if the current URL is a local address (IP, .local hostname, or pump-XXXXXX-owner)
     private var isCurrentURLLocal: Bool {
-        guard let raw = rawAddress?.trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
-        
-        // Check if it's an IP address
-        if raw.range(of: #"^https?://\d{1,3}(\.\d{1,3}){3}"#, options: .regularExpression) != nil {
+        guard let raw = rawAddress?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return false }
+
+        let host = URL(string: raw)?.host ?? raw
+        return isLocalHost(host)
+    }
+
+    private func isLocalHost(_ host: String) -> Bool {
+        if host.hasSuffix(".local") {
             return true
         }
-        
-        // Check if it's a .local address
-        if raw.contains(".local") {
+
+        if host.range(of: #"^pump-\d+-owner$"#, options: .regularExpression) != nil {
             return true
         }
-        
-        // Check for pump-XXXXXX-owner hostname (local network)
-        if raw.range(of: #"pump-\d+-owner"#, options: .regularExpression) != nil {
+
+        if host.range(of: #"^\d{1,3}(\.\d{1,3}){3}$"#, options: .regularExpression) != nil {
             return true
         }
-        
-        // Check if it's just an IP without protocol
-        if raw.range(of: #"^\d{1,3}(\.\d{1,3}){3}$"#, options: .regularExpression) != nil {
-            return true
-        }
-        
-        // Otherwise it's likely a tunnel URL (https://domain)
+
         return false
     }
     
@@ -328,13 +326,14 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
             currentNetworkType = "Cellular"
             isOnLocalNetwork = false
         } else if detectedType == .wifi {
-            // WiFi network - check if it's home network with discovered bridge
-            if isOnHomeNetworkScope() && isBridgeDiscoveredLocally() {
-                currentNetworkType = "WiFi"
+            currentNetworkType = "WiFi"
+            if homeNetworkScope == nil {
+                // First-time setup: rely on discovery or a local URL.
+                isOnLocalNetwork = !discoveredBridges.isEmpty || isCurrentURLLocal
+            } else if isOnHomeNetworkScope() && isBridgeDiscoveredLocally() {
                 isOnLocalNetwork = true
             } else {
                 // Either different scope OR same scope but bridge not found
-                currentNetworkType = "WiFi"
                 isOnLocalNetwork = false
             }
         } else if detectedType == .wiredEthernet {
@@ -474,7 +473,7 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
                 // Not on WiFi (cellular or other), prefer tunnel URL (verify it first)
                 if rawAddress != tunnelURL || forceSwitch {
                     print("Network is NOT WiFi (cellular/other), switching to tunnel URL: \(tunnelURL)")
-                    verifyAndSwitchURL(tunnelURL, fallback: savedBridge.localAddress, timeout: 3.0)
+                    verifyAndSwitchURL(tunnelURL, fallback: nil, timeout: 3.0)
                 }
             }
         } else if let tunnelURL = savedTunnelURL {
@@ -596,11 +595,17 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     /// Start smart discovery with automatic 10-second timeout
     private func startSmartDiscovery() {
         print("Starting smart bridge discovery...")
+
+        if discoveryInProgress {
+            print("📡 Discovery already in progress - skipping restart")
+            return
+        }
         
         // Only run discovery if on WiFi - mDNS doesn't work on cellular
         guard let path = networkMonitor?.currentPath, path.usesInterfaceType(.wifi) else {
             print("Not on WiFi - skipping mDNS discovery (cellular/other network)")
             stopDiscoveryRetry()
+            discoveryInProgress = false
             return
         }
         
@@ -608,6 +613,7 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         guard shouldRunDiscovery() else {
             print("Smart discovery check failed - using tunnel")
             switchToTunnelURL()
+            discoveryInProgress = false
             return
         }
         
@@ -619,22 +625,38 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         browser = NetServiceBrowser()
         browser?.delegate = self
         browser?.searchForServices(ofType: "_dvi-bridge._tcp.", inDomain: "local.")
-        
-        // Set up 10-second hard stop for discovery
-        discoveryStopTimer?.invalidate()
-        discoveryStopTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { [weak self] _ in
-            print("⏱️ 10-second discovery window expired - stopping discovery")
-            self?.stopDiscovery()
-            // If no bridge found, ensure we're using tunnel
-            if self?.discoveredBridges.isEmpty == true {
-                print("No bridges discovered in time window - falling back to tunnel")
-                self?.switchToTunnelURL()
-            }
-        }
-        
+        scheduleDiscoveryStopTimer()
+        discoveryInProgress = true
+
         // Discovery retry disabled - mDNS is expensive and retrying every 5s wastes battery
         // If bridge isn't found in first scan, it likely won't appear until next network change
         // Let the OS network change detection handle it instead of continuous polling
+    }
+
+    private func scheduleDiscoveryStopTimer() {
+        discoveryStopTimer?.invalidate()
+        discoveryStopTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            if !self.resolvingServices.isEmpty {
+                print("⏱️ Discovery window expired but services are resolving - extending 5s")
+                self.discoveryStopTimer?.invalidate()
+                self.discoveryStopTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+                    self?.finishDiscoveryWindow()
+                }
+                return
+            }
+            self.finishDiscoveryWindow()
+        }
+    }
+
+    private func finishDiscoveryWindow() {
+        print("⏱️ Discovery window expired - stopping discovery")
+        stopDiscovery()
+        if discoveredBridges.isEmpty {
+            print("No bridges discovered in time window - falling back to tunnel")
+            switchToTunnelURL()
+        }
+        discoveryInProgress = false
     }
     
     func startDiscovery() {
@@ -657,6 +679,7 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         // Stop the 10-second discovery window timer
         discoveryStopTimer?.invalidate()
         discoveryStopTimer = nil
+        discoveryInProgress = false
     }
     
     private func scheduleDiscoveryRetry() {
@@ -727,6 +750,7 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         print("Found service: \(service.name)")
         service.delegate = self
         resolvingServices.insert(service)
+        scheduleDiscoveryStopTimer()
         service.resolve(withTimeout: 5.0)
     }
     
@@ -804,7 +828,7 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
         
         // Also fetch tunnel URL and hostname via HTTP to get the latest (in case TXT record is outdated)
         // This is especially useful when trycloudflare tunnel is recreated
-        fetchTunnelInfoFromBridge(bridgeURL: localAddr) { [weak self] fetchedURL, fetchedHostname in
+        fetchTunnelInfoFromBridge(bridgeURL: localAddr, allowSave: false) { [weak self] fetchedURL, fetchedHostname in
             // Update bridge entry with fetched info
             let updatedBridge = DiscoveredBridge(
                 name: sender.name,
@@ -859,7 +883,7 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     
     /// Fetch the current tunnel info (URL and hostname) from the bridge when connected locally
     /// This is useful when the tunnel is recreated and the app needs to get the new URL
-    func fetchTunnelInfoFromBridge(bridgeURL: String, completion: ((String?, String?) -> Void)? = nil) {
+    func fetchTunnelInfoFromBridge(bridgeURL: String, allowSave: Bool = true, completion: ((String?, String?) -> Void)? = nil) {
         // Construct endpoint URL (assuming bridge exposes tunnel info at /api/tunnel)
         guard var baseURL = URL(string: bridgeURL.hasPrefix("http") ? bridgeURL : "http://\(bridgeURL)") else {
             print("⚠️ Invalid bridge URL: \(bridgeURL)")
@@ -922,7 +946,7 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
                         }
                         
                         // Update saved tunnel URL if it changed
-                        if let tunnelURL = tunnelURL, self?.savedTunnelURL != tunnelURL {
+                        if allowSave, let tunnelURL = tunnelURL, self?.savedTunnelURL != tunnelURL {
                             print("🔄 Tunnel URL changed, updating: \(self?.savedTunnelURL ?? "nil") → \(tunnelURL)")
                             self?.savedTunnelURL = tunnelURL
                             
@@ -957,7 +981,7 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     /// Fetch the current tunnel URL from the bridge when connected locally (legacy method)
     /// This is useful when the tunnel is recreated and the app needs to get the new URL
     func fetchTunnelURLFromBridge(bridgeURL: String, completion: ((String?) -> Void)? = nil) {
-        fetchTunnelInfoFromBridge(bridgeURL: bridgeURL) { tunnelURL, _ in
+        fetchTunnelInfoFromBridge(bridgeURL: bridgeURL, allowSave: true) { tunnelURL, _ in
             completion?(tunnelURL)
         }
     }
@@ -995,6 +1019,17 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
     func shouldAutoConnect() -> Bool {
         guard let savedName = savedBridgeName else { return false }
         return discoveredBridges.contains(where: { $0.name == savedName })
+    }
+    
+    func resetSavedBridgeData() {
+        stopDiscovery()
+        savedTunnelURL = nil
+        savedBridgeName = nil
+        homeNetworkScope = nil
+        rawAddress = nil
+        activeURL = nil
+        discoveredBridges.removeAll()
+        discoveredServicesMap.removeAll()
     }
     
     deinit {
