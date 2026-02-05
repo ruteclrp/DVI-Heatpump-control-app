@@ -68,9 +68,13 @@ class BridgeConfig: NSObject, ObservableObject, NetServiceBrowserDelegate, NetSe
 
     // MARK: - Normalized URL
     var normalizedURL: URL? {
-        guard let raw = rawAddress?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !raw.isEmpty else { return nil }
+        guard let raw = rawAddress else { return nil }
+        return normalizedURL(from: raw)
+    }
+
+    func normalizedURL(from rawAddress: String) -> URL? {
+        let raw = rawAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return nil }
 
         if raw.hasPrefix("http://") || raw.hasPrefix("https://") {
             return URL(string: raw)
