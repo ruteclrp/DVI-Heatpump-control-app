@@ -91,7 +91,7 @@ struct ContentView: View {
     @EnvironmentObject var bridgeConfig: BridgeConfig
 
     @State private var manualAddress = ""
-    @State private var showWebView = false
+    // Removed showWebView: no longer using SidecarWebView
     @State private var errorMessage: String?
     @State private var reloadTrigger = false
     @State private var showQRScanner = false
@@ -105,11 +105,9 @@ struct ContentView: View {
         NavigationView {
             VStack(spacing: 24) {
                 // Only show title if not in settings sheet
-                if !showWebView {
-                    Text("Connect to your DVI Heatpump")
-                        .font(.title2)
-                        .padding(.top, 40)
-                }
+                Text("Connect to your DVI Heatpump")
+                    .font(.title2)
+                    .padding(.top, 40)
 
                 // Auto-discovered bridges
                 if !bridgeConfig.discoveredBridges.isEmpty {
@@ -186,7 +184,7 @@ struct ContentView: View {
                 }
                 .padding(.top, 10)
 
-                // Tunnel refresh button (only show when on local network)
+                // Tunnel refresh and token fetch UI remains (for now)
                 if bridgeConfig.isOnLocalNetwork && bridgeConfig.rawAddress != nil {
                     VStack(spacing: 8) {
                         Button(action: {
@@ -212,8 +210,6 @@ struct ContentView: View {
                         }
                     }
                     .padding(.top, 8)
-
-                    // Fetch and save token from RPi (visible only on local network)
                     Button(action: {
                         let rpiIP = bridgeConfig.rawAddress ?? ""
                         fetchTokenFromRPi(rpiIP: rpiIP) { token in
@@ -276,14 +272,6 @@ struct ContentView: View {
             .onChange(of: bridgeConfig.rawAddress) {
                 if let activeAddress = bridgeConfig.rawAddress {
                     manualAddress = activeAddress
-                    if showWebView {
-                        reloadTrigger = true
-                    }
-                }
-            }
-            .onChange(of: bridgeConfig.activeURL) {
-                if showWebView && bridgeConfig.activeURL != nil {
-                    reloadTrigger = true
                 }
             }
             .onChange(of: scannedCode) {
@@ -298,55 +286,7 @@ struct ContentView: View {
                 QRScannerView(scannedCode: $scannedCode)
                     .edgesIgnoringSafeArea(.all)
             }
-            .sheet(isPresented: $showWebView) {
-                NavigationView {
-                    if let url = bridgeConfig.normalizedURL {
-                        VStack(spacing: 0) {
-                            HStack {
-                                if bridgeConfig.isVerifyingConnection {
-                                    ProgressView()
-                                        .scaleEffect(0.8)
-                                    Text("Verifying connection...")
-                                        .font(.subheadline)
-                                        .foregroundColor(.secondary)
-                                } else {
-                                    Image(systemName: bridgeConfig.isOnLocalNetwork ? "wifi" : "antenna.radiowaves.left.and.right")
-                                        .foregroundColor(bridgeConfig.isOnLocalNetwork ? .green : .blue)
-                                        .font(.system(size: 14))
-                                    Text(bridgeConfig.isOnLocalNetwork ? "WiFi - Home Network" : "\(bridgeConfig.currentNetworkType) - Remote Tunnel")
-                                        .font(.subheadline)
-                                        .foregroundColor(.primary)
-                                }
-                                Spacer()
-                            }
-                            .padding()
-                            .background(bridgeConfig.isOnLocalNetwork ? Color.green.opacity(0.1) : Color.blue.opacity(0.1))
-                            .border(bridgeConfig.isOnLocalNetwork ? Color.green.opacity(0.3) : Color.blue.opacity(0.3), width: 0.5)
-                            SidecarWebView(url: url, reloadTrigger: $reloadTrigger)
-                        }
-                        .navigationTitle("Sidecar")
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar {
-                            ToolbarItem(placement: .navigationBarLeading) {
-                                Button("Change Address") {
-                                    showWebView = false
-                                    if let currentAddress = bridgeConfig.rawAddress {
-                                        manualAddress = currentAddress
-                                    }
-                                }
-                            }
-                            ToolbarItem(placement: .navigationBarTrailing) {
-                                Button("Reload") {
-                                    reloadTrigger = true
-                                }
-                            }
-                        }
-                    } else {
-                        Text("Invalid URL")
-                            .foregroundColor(.red)
-                    }
-                }
-            }
+            // Removed SidecarWebView sheet
         }
     }
     
@@ -363,9 +303,8 @@ struct ContentView: View {
             errorMessage = "Invalid address format."
             return
         }
-
-        showWebView = true
-    }    
+        // No longer show web view; will use API endpoints
+    }
     private func refreshTunnelURL() {
         guard let currentAddress = bridgeConfig.rawAddress else {
             tunnelRefreshMessage = "⚠️ Not connected to bridge"
