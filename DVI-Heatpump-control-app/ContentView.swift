@@ -200,6 +200,12 @@ struct ContentView: View {
                 connectContent
             }
         }
+        .onAppear {
+            autoConnectIfRemote()
+        }
+        .onChange(of: bridgeConfig.currentNetworkType) {
+            autoConnectIfRemote()
+        }
     }
 
     @ViewBuilder
@@ -462,6 +468,22 @@ struct ContentView: View {
                     tunnelRefreshMessage = "⚠️ Could not fetch tunnel URL"
                 }
             }
+        }
+    }
+
+    private func autoConnectIfRemote() {
+        guard !showWebView else { return }
+        guard !bridgeConfig.isOnLocalNetwork else { return }
+
+        if let activeURL = bridgeConfig.activeURL ?? bridgeConfig.normalizedURL {
+            webViewURL = activeURL
+            showWebView = true
+            return
+        }
+
+        if let raw = bridgeConfig.rawAddress, !raw.isEmpty {
+            manualAddress = raw
+            attemptConnection()
         }
     }
 }
