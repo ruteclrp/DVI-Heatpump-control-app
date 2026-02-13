@@ -139,15 +139,20 @@ struct ContentView: View {
     // Removed showWebView: no longer using SidecarWebView
     @State private var errorMessage: String?
     @State private var reloadTrigger = false
-    @State private var showQRScanner = false
-    @State private var scannedCode: String? = nil
-    @State private var hasAutoConnected = false
-    @State private var isRefreshingTunnel = false
-    @State private var tunnelRefreshMessage: String?
     @State private var tokenStatus: String? = nil
     @State private var showWebView = false
     @State private var webViewURL: URL? = nil
     @State private var showResetConfirm = false
+    @State private var showSettingsPanel = false
+    @State private var hasAutoConnected = false
+    @State private var isRefreshingTunnel = false
+    @State private var tunnelRefreshMessage: String?
+
+    private let diagramSize = CGSize(width: 550, height: 380)
+    private let diagramHeaderHeight: CGFloat = 24
+    private var diagramAspectRatio: CGFloat {
+        diagramSize.width / (diagramSize.height + diagramHeaderHeight)
+    }
 
     private var localBridgeAddress: String? {
         bridgeConfig.rawAddress ?? bridgeConfig.discoveredBridges.first?.preferredLocalAddress
@@ -158,48 +163,54 @@ struct ContentView: View {
     }
 
     var body: some View {
-        let isLandscape = verticalSizeClass == .compact
-        return NavigationView {
-            mainContent(isLandscape: isLandscape)
-                .navigationTitle(isLandscape ? "" : "DVI Heatpump")
-                .toolbar(isLandscape ? .hidden : .visible, for: .navigationBar)
-                .navigationBarHidden(isLandscape)
-                .onChange(of: bridgeConfig.activeURL) {
-                    guard let newURL = bridgeConfig.activeURL else { return }
-                    if webViewURL?.absoluteString == newURL.absoluteString {
-                        return
+        GeometryReader { proxy in
+            let isLandscape = proxy.size.width > proxy.size.height
+            let isPad = UIDevice.current.userInterfaceIdiom == .pad
+            let isPadLandscape = isPad && isLandscape
+            NavigationView {
+                mainContent(isLandscape: isLandscape, isPad: isPad, isPadLandscape: isPadLandscape)
+                    .navigationTitle(isLandscape ? "" : "DVI Heatpump")
+                    .navigationBarHidden(isLandscape)
+                    .onChange(of: bridgeConfig.activeURL) {
+                        guard let newURL = bridgeConfig.activeURL else { return }
+                        if webViewURL?.absoluteString == newURL.absoluteString {
+                            return
+                        }
+                        webViewURL = newURL
+                        if showWebView {
+                            reloadTrigger = true
+                        }
                     }
-                    webViewURL = newURL
-                    if showWebView {
-                        reloadTrigger = true
-                    }
-                }
-                .onChange(of: bridgeConfig.discoveredBridges) {
-                    if !hasAutoConnected && bridgeConfig.shouldAutoConnect() {
-                        hasAutoConnected = true
-                        if let activeURL = bridgeConfig.activeURL {
-                            manualAddress = activeURL.absoluteString
+                    .onChange(of: bridgeConfig.discoveredBridges) {
+                        if !hasAutoConnected && bridgeConfig.shouldAutoConnect() {
+                            hasAutoConnected = true
+                            if let activeURL = bridgeConfig.activeURL {
+                                manualAddress = activeURL.absoluteString
+                                attemptConnection()
+                            }
+                        } else if bridgeConfig.activeURL == nil,
+                                  bridgeConfig.rawAddress == nil,
+                                  let firstBridge = bridgeConfig.discoveredBridges.first {
+                            manualAddress = firstBridge.preferredLocalAddress
                             attemptConnection()
                         }
-                    } else if bridgeConfig.activeURL == nil,
-                              bridgeConfig.rawAddress == nil,
-                              let firstBridge = bridgeConfig.discoveredBridges.first {
-                        manualAddress = firstBridge.preferredLocalAddress
-                        attemptConnection()
                     }
-                }
+            }
+            .navigationViewStyle(.stack)
+            .frame(width: proxy.size.width, height: proxy.size.height)
         }
     }
 
     @ViewBuilder
-    private func mainContent(isLandscape: Bool) -> some View {
+    private func mainContent(isLandscape: Bool, isPad: Bool, isPadLandscape: Bool) -> some View {
         VStack(spacing: 0) {
             if showWebView, let url = webViewURL ?? bridgeConfig.activeURL {
-                webViewContent(url: url, isLandscape: isLandscape)
+                webViewContent(url: url, isLandscape: isLandscape, isPad: isPad, isPadLandscape: isPadLandscape)
             } else {
                 connectContent
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             autoConnectIfRemote()
         }
@@ -209,24 +220,46 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private func webViewContent(url: URL, isLandscape: Bool) -> some View {
+    private func webViewContent(url: URL, isLandscape: Bool, isPad: Bool, isPadLandscape: Bool) -> some View {
         let requiresAuth = (url.scheme?.lowercased() == "https")
         let authToken = requiresAuth ? loadTokenFromKeychain() : nil
         if !isLandscape {
-            connectionStatusView(authToken: authToken, requiresAuth: requiresAuth)
+            connectionStatusView(authToken: authToken, requiresAuth: requiresAuth, isPad: isPad, isPadLandscape: isPadLandscape)
         }
-        webViewCanvas(url: url, authToken: authToken, isLandscape: isLandscape)
+
+        Group {
+            if isPad {
+                ZStack(alignment: .trailing) {
+                    webViewCanvas(url: url, authToken: authToken, isLandscape: isLandscape, isPad: isPad)
+                    if showSettingsPanel {
+                        Color.black.opacity(0.3)
+                            .ignoresSafeArea()
+                            .onTapGesture { showSettingsPanel = false }
+                        settingsPanel
+                            .transition(.move(edge: .trailing))
+                    }
+                }
+                .animation(.easeInOut(duration: 0.2), value: showSettingsPanel)
+            } else {
+                webViewCanvas(url: url, authToken: authToken, isLandscape: isLandscape, isPad: isPad)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
-    private func connectionStatusView(authToken: String?, requiresAuth: Bool) -> some View {
+    private func connectionStatusView(authToken: String?, requiresAuth: Bool, isPad: Bool, isPadLandscape: Bool) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Connection Status")
                     .font(.headline)
                 Spacer()
                 Button("Settings") {
-                    showWebView = false
+                    if isPad {
+                        showSettingsPanel.toggle()
+                    } else {
+                        showWebView = false
+                    }
                 }
             }
             Text("Network: \(bridgeConfig.currentNetworkType)")
@@ -250,21 +283,30 @@ struct ContentView: View {
         .background(Color(.systemGray6))
     }
 
-    @ViewBuilder
-    private func webViewCanvas(url: URL, authToken: String?, isLandscape: Bool) -> some View {
-        GeometryReader { proxy in
-            let webView = SidecarWebView(url: url, authToken: authToken, reloadTrigger: $reloadTrigger)
-                .frame(width: proxy.size.width, height: proxy.size.height)
+    private var settingsPanel: some View {
+        connectContent
+            .frame(width: 360)
+            .background(Color(.systemBackground))
+            .ignoresSafeArea(edges: .vertical)
+    }
 
-            if isLandscape {
-                ZStack {
-                    Color.black
-                    webView
-                }
-                .ignoresSafeArea()
-            } else {
-                webView
+    @ViewBuilder
+    private func webViewCanvas(url: URL, authToken: String?, isLandscape: Bool, isPad: Bool) -> some View {
+        if isLandscape && !isPad {
+            GeometryReader { proxy in
+                let desiredWidth = proxy.size.height * diagramAspectRatio
+                let scale = min(1.0, desiredWidth / max(proxy.size.width, 1.0))
+                let scaledHeight = proxy.size.height / max(scale, 0.0001)
+                SidecarWebView(url: url, authToken: authToken, reloadTrigger: $reloadTrigger)
+                    .frame(width: proxy.size.width, height: scaledHeight, alignment: .top)
+                    .scaleEffect(scale, anchor: .top)
+                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+                    .ignoresSafeArea()
             }
+        } else {
+            SidecarWebView(url: url, authToken: authToken, reloadTrigger: $reloadTrigger)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .ignoresSafeArea()
         }
     }
 
@@ -335,13 +377,7 @@ struct ContentView: View {
             .padding(.horizontal)
 
             HStack(spacing: 16) {
-                Button(action: {
-                    showQRScanner = true
-                    hideKeyboard()
-                }) {
-                    Label("Scan QR", systemImage: "qrcode.viewfinder")
-                }
-                .buttonStyle(.bordered)
+                // Removed QR Scan button
                 Button("Connect") {
                     attemptConnection()
                     hideKeyboard()
