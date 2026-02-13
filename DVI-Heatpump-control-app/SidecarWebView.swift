@@ -43,28 +43,6 @@ struct SidecarWebView: UIViewRepresentable {
                 document.head.appendChild(meta);
             }
             meta.setAttribute('content', 'width=device-width,height=device-height,initial-scale=1,maximum-scale=1,viewport-fit=cover');
-
-            var style = document.createElement('style');
-            style.innerHTML = `
-                html, body { margin: 0; padding: 0; width: 100%; height: 100vh; max-height: 100vh; background: #000; }
-                body { overscroll-behavior: none; }
-                @media (max-height: 500px) and (orientation: landscape) {
-                    ha-card { height: 100vh; min-height: 100vh; max-height: 100vh; align-self: stretch; }
-                    ha-card, ha-card > * { box-sizing: border-box; }
-                    .diagram { height: 100%; max-height: 100%; align-self: stretch; }
-                    .mode-chips-bar {
-                        height: 100%;
-                        max-height: 100%;
-                        align-self: stretch;
-                        display: flex;
-                        flex-direction: column;
-                        flex: 1 1 auto;
-                        overflow-y: auto;
-                    }
-                    .mode-chips-bar::after { content: ""; flex: 1 1 auto; }
-                }
-            `;
-            document.head.appendChild(style);
         })();
         """
         let script = WKUserScript(source: js, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
