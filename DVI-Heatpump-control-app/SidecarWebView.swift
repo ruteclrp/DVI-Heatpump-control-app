@@ -20,9 +20,6 @@ struct SidecarWebView: UIViewRepresentable {
         context.coordinator.allowedHost = url.host
         context.coordinator.authToken = authToken
         webView.navigationDelegate = context.coordinator
-        webView.isOpaque = false
-        webView.backgroundColor = .black
-        webView.scrollView.backgroundColor = .black
         if #available(iOS 11.0, *) {
             webView.scrollView.contentInsetAdjustmentBehavior = .never
         }
@@ -34,19 +31,6 @@ struct SidecarWebView: UIViewRepresentable {
     private func makeConfiguration() -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
         config.defaultWebpagePreferences.preferredContentMode = .mobile
-        let js = """
-        (function() {
-            var meta = document.querySelector('meta[name="viewport"]');
-            if (!meta) {
-                meta = document.createElement('meta');
-                meta.name = 'viewport';
-                document.head.appendChild(meta);
-            }
-            meta.setAttribute('content', 'width=device-width,height=device-height,initial-scale=1,maximum-scale=1,viewport-fit=cover');
-        })();
-        """
-        let script = WKUserScript(source: js, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
-        config.userContentController.addUserScript(script)
         return config
     }
 
@@ -79,6 +63,9 @@ struct SidecarWebView: UIViewRepresentable {
         weak var webView: WKWebView?
         var authToken: String?
         var allowedHost: String?
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        }
 
         func webView(_ webView: WKWebView,
                      decidePolicyFor navigationAction: WKNavigationAction,

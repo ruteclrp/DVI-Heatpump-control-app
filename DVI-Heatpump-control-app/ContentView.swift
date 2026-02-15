@@ -133,10 +133,8 @@ func fetchTokenFromRPi(rpiIP: String, completion: @escaping (String?) -> Void) {
 
 struct ContentView: View {
     @EnvironmentObject var bridgeConfig: BridgeConfig
-    @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     @State private var manualAddress = ""
-    // Removed showWebView: no longer using SidecarWebView
     @State private var errorMessage: String?
     @State private var reloadTrigger = false
     @State private var tokenStatus: String? = nil
@@ -148,11 +146,7 @@ struct ContentView: View {
     @State private var isRefreshingTunnel = false
     @State private var tunnelRefreshMessage: String?
 
-    private let diagramSize = CGSize(width: 550, height: 380)
-    private let diagramHeaderHeight: CGFloat = 24
-    private var diagramAspectRatio: CGFloat {
-        diagramSize.width / (diagramSize.height + diagramHeaderHeight)
-    }
+    // Landscape layout is now driven by web CSS; no app-side scaling constants.
 
     private var localBridgeAddress: String? {
         bridgeConfig.rawAddress ?? bridgeConfig.discoveredBridges.first?.preferredLocalAddress
@@ -292,21 +286,20 @@ struct ContentView: View {
 
     @ViewBuilder
     private func webViewCanvas(url: URL, authToken: String?, isLandscape: Bool, isPad: Bool) -> some View {
-        if isLandscape && !isPad {
-            GeometryReader { proxy in
-                let desiredWidth = proxy.size.height * diagramAspectRatio
-                let scale = min(1.0, desiredWidth / max(proxy.size.width, 1.0))
-                let scaledHeight = proxy.size.height / max(scale, 0.0001)
+        GeometryReader { proxy in
+            let isPhone = UIDevice.current.userInterfaceIdiom == .phone
+            let horizontalInset = (isPhone && isLandscape) ? max(12, proxy.size.width * 0.02) : 0
+            let targetWidth = max(0, proxy.size.width - (horizontalInset * 2))
+            HStack {
+                Spacer(minLength: 0)
                 SidecarWebView(url: url, authToken: authToken, reloadTrigger: $reloadTrigger)
-                    .frame(width: proxy.size.width, height: scaledHeight, alignment: .top)
-                    .scaleEffect(scale, anchor: .top)
-                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
-                    .ignoresSafeArea()
+                    .frame(width: targetWidth, height: proxy.size.height)
+                    .clipped()
+                Spacer(minLength: 0)
             }
-        } else {
-            SidecarWebView(url: url, authToken: authToken, reloadTrigger: $reloadTrigger)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .ignoresSafeArea()
+            .padding(.horizontal, horizontalInset)
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .ignoresSafeArea(isPhone && isLandscape ? [] : .all)
         }
     }
 
