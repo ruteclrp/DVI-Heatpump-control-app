@@ -18,20 +18,27 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
-	<key>UILaunchScreen</key>
-	<dict>
-		<key>UIImageName</key>
-		<string></string>
-		<key>UIColorName</key>
-		<string></string>
-	</dict>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_dvi-bridge._tcp</string>
+	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>Camera access is required to scan QR codes for bridge configuration</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Local network access is required to discover DVI bridges on your WiFi network</string>
-	<key>NSBonjourServices</key>
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string></string>
+		<key>UIImageName</key>
+		<string></string>
+	</dict>
+	<key>UISupportedInterfaceOrientations</key>
 	<array>
-		<string>_dvi-bridge._tcp</string>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>UTImportedTypeDeclarations</key>
 	<array>
